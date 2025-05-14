@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import argparse
 import random
@@ -5,6 +6,8 @@ import numpy as np
 import time
 from server import Server
 from datasets import Dataset
+# import cv2
+import importlib
 
 
 def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
@@ -12,7 +15,9 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
     # Import the file
     import importlib
 
-    game_state = importlib.import_module(f"games.{file_name}").Game()
+    module_name = "games." + file_name
+    game_module = importlib.import_module(module_name)
+    game_state = game_module.Game()
     game_state.reset_level()
     server = Server(port)
     server.start()
@@ -20,8 +25,8 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
     num_inputs = game_state.num_inputs
     last_action = [0] * num_inputs
 
-    print(f"max_num_particles: {game_state.max_num_particles}")
-    print(f"num_inputs: {num_inputs}")
+    print("max_num_particles: {}".format(game_state.max_num_particles))
+    print("num_inputs: {}".format(num_inputs))
 
     states_all = []
     frame_count = 0
@@ -43,6 +48,17 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
         else:
             keys = server.get_key_pressed()
             new_action = game_state.get_user_inputs(keys)
+            # Get mouse information and pass it to the game
+            mouse_pos, mouse_clicked = server.get_mouse_info()
+            game_state.handle_input(new_action, mouse_pos, mouse_clicked)
+
+        # 每100帧输出一次粒子信息
+        if frame_count % 100 == 0:
+            try:
+                particles_info = {p_type: len(game_state.get_particles(p_type)) for p_type in ["player", "enemy", "weapon", "xp"]}
+                print("帧 {}: 粒子数量 = {}".format(frame_count, particles_info))
+            except Exception as e:
+                print("调试输出错误: {}".format(e))
 
         # Store state if generating data
         if gen_frames > 0:
@@ -56,21 +72,22 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
                 })
                 states_all.append({
                     "prev_game_state": prev_encoded,
-                    "cur_game_state": "{"+ f"id:{game_state.next_id + random.randint(0, 10)}" + "}",
+                    "cur_game_state": "{" + "id:{}".format(game_state.next_id + random.randint(0, 10)) + "}",
                     "user_input": ", ".join(keys)
                 })
             frame_count += 1
             prev_encoded = encoded
             if frame_count >= gen_frames:
                 Dataset.from_list(states_all).save_to_disk(save_name)
-                print(f"Saved {gen_frames} frames")
+                print("Saved {} frames".format(gen_frames))
                 return
 
             if frame_count % show_every == 0:
-                print(f"Step {frame_count} of {gen_frames}")
+                print("Step {} of {}".format(frame_count, gen_frames))
 
         if gen_frames == 0 or frame_count % show_every == 0:
             server.update_frame(game_state.get_frame())
+            frame_count += 1  # 确保计数器增加
             if gen_frames == 0:
                 time.sleep(1 / game_state.fps)
 

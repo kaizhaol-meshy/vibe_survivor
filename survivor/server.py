@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import asyncio
 import websockets
 from aiohttp import web
@@ -16,17 +17,26 @@ class Server:
         self.current_frame = None
         self.dt = 0.016  # 60fps
         self.keys_pressed = {}  # Add this line to store key states
+        self.mouse_pos = (0, 0)  # Add this line to store mouse position
+        self.mouse_clicked = False  # Add this line to track mouse clicks
         self.app = web.Application()
         self.app.router.add_get("/", self.handle_index)
         self.port = port
         self.websocket_port = port + 1
 
-    def update_frame(self, frame: Frame):
+    def update_frame(self, frame):
         self.current_frame = frame
 
     def get_key_pressed(self):
         """Return the current state of pressed keys"""
         return self.keys_pressed
+
+    def get_mouse_info(self):
+        """Return the current mouse position and click state"""
+        # Reset click state after it's read
+        clicked = self.mouse_clicked
+        self.mouse_clicked = False
+        return self.mouse_pos, clicked
 
     async def websocket_handler(self, websocket):
         try:
@@ -34,10 +44,17 @@ class Server:
                 # Handle incoming key events
                 try:
                     message = await asyncio.wait_for(websocket.recv(), timeout=0.001)
-                    key_data = json.loads(
-                        message
-                    )  # Changed from eval() to json.loads()
-                    self.keys_pressed = key_data
+                    data = json.loads(message)  # Changed from eval() to json.loads()
+                    
+                    # Check if it's a mouse event
+                    if 'type' in data and data['type'] == 'mouse':
+                        if 'clicked' in data and data['clicked']:
+                            self.mouse_clicked = True
+                        if 'x' in data and 'y' in data:
+                            self.mouse_pos = (data['x'], data['y'])
+                    else:
+                        # It's a keyboard event
+                        self.keys_pressed = data
                 except asyncio.TimeoutError:
                     pass
 
@@ -57,7 +74,7 @@ class Server:
             <title>Physics Simulation</title>
         </head>
         <body style="margin:0">
-            <canvas id="canvas" width="1024" height="1024"></canvas>
+            <canvas id="canvas" width="1024" height="576" style="display:block;margin:0 auto;"></canvas>
             <script>
                 const canvas = document.getElementById('canvas');
                 const ctx = canvas.getContext('2d');
@@ -81,6 +98,48 @@ class Server:
                             ctx.fillStyle = obj.color;
                             ctx.fillText(obj.text, obj.x, obj.y);
                             break;
+                            
+                        case 'circle':
+                            ctx.beginPath();
+                            ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
+                            ctx.fillStyle = obj.color;
+                            ctx.fill();
+                            break;
+                            
+                        case 'triangle':
+                            ctx.save();
+                            ctx.translate(obj.x, obj.y);
+                            ctx.rotate(obj.angle * Math.PI / 180);
+                            
+                            ctx.beginPath();
+                            ctx.moveTo(0, -obj.size/2);
+                            ctx.lineTo(-obj.size/2, obj.size/2);
+                            ctx.lineTo(obj.size/2, obj.size/2);
+                            ctx.closePath();
+                            
+                            ctx.fillStyle = obj.color;
+                            ctx.fill();
+                            ctx.restore();
+                            break;
+                            
+                        case 'cross':
+                            ctx.save();
+                            ctx.translate(obj.x, obj.y);
+                            
+                            const halfSize = obj.size / 2;
+                            const lineWidth = obj.size / 5;
+                            
+                            // 绘制十字形
+                            ctx.fillStyle = obj.color;
+                            
+                            // 水平线
+                            ctx.fillRect(-halfSize, -lineWidth/2, obj.size, lineWidth);
+                            
+                            // 垂直线
+                            ctx.fillRect(-lineWidth/2, -halfSize, lineWidth, obj.size);
+                            
+                            ctx.restore();
+                            break;
                     }
                 }
 
@@ -101,6 +160,30 @@ class Server:
                     window.addEventListener('keyup', (event) => {
                         delete keysPressed[event.key];
                         ws.send(JSON.stringify(keysPressed));
+                    });
+                    
+                    // Add mouse event listeners
+                    canvas.addEventListener('mousemove', (event) => {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = event.clientX - rect.left;
+                        const y = event.clientY - rect.top;
+                        ws.send(JSON.stringify({
+                            type: 'mouse',
+                            x: x,
+                            y: y
+                        }));
+                    });
+                    
+                    canvas.addEventListener('click', (event) => {
+                        const rect = canvas.getBoundingClientRect();
+                        const x = event.clientX - rect.left;
+                        const y = event.clientY - rect.top;
+                        ws.send(JSON.stringify({
+                            type: 'mouse',
+                            x: x,
+                            y: y,
+                            clicked: true
+                        }));
                     });
 
                     ws.onmessage = function(event) {

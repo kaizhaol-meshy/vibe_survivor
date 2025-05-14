@@ -35,6 +35,34 @@ class Rectangle:
     type: str = "rectangle"
 
 
+@dataclass
+class Circle:
+    x: float
+    y: float
+    radius: float
+    color: str
+    type: str = "circle"
+
+
+@dataclass
+class Triangle:
+    x: float
+    y: float
+    size: float
+    angle: float
+    color: str
+    type: str = "triangle"
+
+
+@dataclass
+class Cross:
+    x: float
+    y: float
+    size: float
+    color: str
+    type: str = "cross"
+
+
 class Frame:
     def __init__(self) -> None:
         self.objects = []
@@ -47,6 +75,15 @@ class Frame:
 
     def add_text(self, text):
         self.objects.append(text)
+
+    def add_circle(self, circle: Circle):
+        self.objects.append(circle)
+
+    def add_triangle(self, triangle: Triangle):
+        self.objects.append(triangle)
+
+    def add_cross(self, cross: Cross):
+        self.objects.append(cross)
 
     def serialize(self):
         serialized_objects = [vars(obj) for obj in self.objects]

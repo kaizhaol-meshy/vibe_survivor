@@ -1,8 +1,10 @@
 import re
 from abc import ABC, abstractmethod
 import copy
+from health_system import HealthSystem
+
 SCREEN_WIDTH = 1024
-SCREEN_HEIGHT = 1024 // 16 * 9
+SCREEN_HEIGHT = 576
 
 SPATIAL_RESOLUTION = 1024
 NUM_INPUTS = 4
@@ -17,14 +19,48 @@ class Particle:
         if attributes is None:
             attributes = {}
         self.attributes = attributes
+        
+        # Initialize health system if health attributes are provided
+        if 'base_hp' in attributes:
+            max_hp = attributes.get('max_hp', attributes['base_hp'])
+            self.health_system = HealthSystem(attributes['base_hp'], max_hp)
+        else:
+            self.health_system = None
 
     def to_str(self):
+        attr_str = []
+        for k, v in self.attributes.items():
+            if k != 'id':
+                attr_str.append(f'{k}:{v}')
+        
+        # Add health info to attributes if health system exists
+        if self.health_system:
+            attr_str.append(f'current_hp:{self.health_system.current_hp}')
+            attr_str.append(f'is_alive:{int(self.health_system.is_alive)}')
+            
         if len(self.attributes) > 0:
             assert "id" in self.attributes
-            return f"{{id:{self.attributes['id']}, kind:{self.kind}, x:{self.x}, y:{self.y}, {', '.join([f'{k}:{v}' for k, v in self.attributes.items() if k != 'id'])}}}\n"
+            return f"{{id:{self.attributes['id']}, kind:{self.kind}, x:{self.x}, y:{self.y}, {', '.join(attr_str)}}}\n"
         else:
             return f"{{id:0, kind:{self.kind}, x:{self.x}, y:{self.y}}}\n"
-
+            
+    def take_damage(self, damage_amount):
+        """Apply damage to this particle if it has a health system"""
+        if self.health_system:
+            return self.health_system.take_damage(damage_amount)
+        return True
+        
+    def heal(self, heal_amount):
+        """Heal this particle if it has a health system"""
+        if self.health_system:
+            return self.health_system.heal(heal_amount)
+        return 0
+        
+    def is_alive(self):
+        """Check if this particle is alive"""
+        if self.health_system:
+            return self.health_system.is_alive
+        return True  # Particles without health systems are always considered "alive"
 
 class BaseGame(ABC):
     def __init__(self, max_num_particles):
@@ -90,7 +126,18 @@ class BaseGame(ABC):
                         attributes[k] = float(v)
                     except:
                         attributes[k] = v
-            self.particles.append(Particle(kind, x, y, attributes))
+            
+            # Create the particle
+            particle = Particle(kind, x, y, attributes)
+            
+            # If the particle has health-related attributes, set them correctly
+            if particle.health_system and 'current_hp' in pairs:
+                particle.health_system.current_hp = float(pairs['current_hp'])
+                if 'is_alive' in pairs:
+                    particle.health_system.is_alive = bool(int(pairs['is_alive']))
+            
+            self.particles.append(particle)
+        
         self.particles = sorted(self.particles, key=lambda p: p.attributes['id'])
         return self.encode()
 
@@ -107,24 +154,64 @@ class BaseGame(ABC):
     def get_user_inputs(self, keys):
         print(keys)
         inputs = [0, 0, 0, 0, 0]
-        inputs[0] = "ArrowLeft" in keys
-        inputs[1] = "ArrowRight" in keys
-        inputs[2] = "ArrowUp" in keys
-        inputs[3] = "ArrowDown" in keys
-        inputs[4] = " " in keys
+        inputs[0] = "a" in keys  # Left
+        inputs[1] = "d" in keys  # Right
+        inputs[2] = "w" in keys  # Up
+        inputs[3] = "s" in keys  # Down
+        inputs[4] = " " in keys  # Space
         print(inputs)
         return inputs
 
     def get_user_keys(self, actions):
         keys = []
         if actions[0]:
-            keys.append("arrow left")
+            keys.append("a")
         if actions[1]:
-            keys.append("arrow right")
+            keys.append("d")
         if actions[2]:
-            keys.append("arrow up")
+            keys.append("w")
         if actions[3]:
-            keys.append("arrow down")
+            keys.append("s")
         if actions[4]:
             keys.append("space")
         return keys
+
+    def apply_damage(self, source_particle, target_particle, damage_amount):
+        """
+        Apply damage from one particle to another
+        
+        Args:
+            source_particle (Particle): The particle causing the damage
+            target_particle (Particle): The particle receiving the damage
+            damage_amount (int): The amount of damage to apply
+            
+        Returns:
+            bool: True if the target is still alive, False if it died
+        """
+        is_alive = target_particle.take_damage(damage_amount)
+        if not is_alive:
+            self.on_particle_death(target_particle, source_particle)
+        return is_alive
+    
+    def heal_particle(self, target_particle, heal_amount):
+        """
+        Heal a particle
+        
+        Args:
+            target_particle (Particle): The particle to heal
+            heal_amount (int): The amount of health to restore
+            
+        Returns:
+            int: The actual amount healed
+        """
+        return target_particle.heal(heal_amount)
+    
+    def on_particle_death(self, dead_particle, killer_particle=None):
+        """
+        Handle a particle's death. Override this in subclasses to add custom behavior.
+        
+        Args:
+            dead_particle (Particle): The particle that died
+            killer_particle (Particle, optional): The particle that caused the death, if any
+        """
+        pass

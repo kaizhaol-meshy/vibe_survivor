@@ -17,6 +17,7 @@ ENEMY_ELITE = "enemy_elite"  # New type for elite enemies
 WEAPON = "weapon"
 XP = "xp"
 DAMAGE_TEXT = "damage_text"  # New particle type for damage numbers
+BLOOD = "blood"  # 新增：血液粒子类型
 
 # Game states
 STATE_START_MENU = "start_menu"
@@ -31,9 +32,10 @@ ELITE_SIZE = int(40 * 0.4)
 WEAPON_SIZE = int(15 * 0.4)
 XP_SIZE = int(10 * 0.4)
 PLAYER_SPEED = 5
-ENEMY_SPEED_MIN = 2
-ENEMY_SPEED_MAX = 2
+ENEMY_SPEED_MIN = 3
+ENEMY_SPEED_MAX = 4
 ELITE_SPEED_MULTIPLIER = 1.5  # Elite enemies move faster
+ENEMY_SPEED_REDUCTION = 0.2  # 全局敌人速度减速系数
 WEAPON_SPEED = 8
 WEAPON_COOLDOWN = 30
 MAX_ENEMIES = 60  # 优化：减少最大敌人数
@@ -188,7 +190,7 @@ WEAPON_TYPES = [
         "crit_multi": 1.0,
         "block_by_walls": False,
         "rarity": 1,
-        "size": 14,
+        "size": 28,
         "shape": "cross",  # 斧子用十字形表示
         "behavior": "arc_throw",
         "upgrade_table": [
@@ -320,13 +322,21 @@ KING_BIBLE_LEVELS = [
 WEAPON_COLORS = {
     "Whip": "#FF3333",
     "MagicWand": "#3399FF",  # 统一为蓝色
-    "Knife": "#CCCCCC",
+    "Knife": {
+        "main": "#FFFFFF",  # 主体为白色
+        "border": "#8B4513"  # 褐色描边
+    },
     "Axe": "#FF9900",
     "Cross": "#FFD700",
     "KingBible": "#0066FF",
     "FireWand": "#FF6600",
     "Garlic": "#FFFF99",
 }
+
+BLOOD_PARTICLE_COUNT = 8  # 每次受伤产生的血液粒子数量
+BLOOD_PARTICLE_SIZE = 3   # 血液粒子大小
+BLOOD_PARTICLE_SPEED = 6  # 血液粒子初始速度
+BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
 
 class Game(BaseGame):
     def __init__(self):
@@ -372,192 +382,140 @@ class Game(BaseGame):
             "Enemies will spawn from the edges of the screen and chase you. "
             "Your weapons will automatically orbit around you and attack nearby enemies."
         )
+        self.last_move_dir = (1, 0)  # 默认向右
+        self.knife_projectile_timer = 0
     
     def get_frame(self):
         """Create and return a Frame object with the current game state"""
-        from graphics import Frame, Circle, Rectangle, Triangle, Cross, Text
         frame = Frame()
         # 1. 先画黑色底
         frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
-        # 2. 升级界面时，先画所有粒子，再画界面
-        if self.game_state == STATE_UPGRADE_MENU:
-            for p in self.particles:
-                if p.kind == PLAYER:
-                    if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
+        
+        # 2. 画血液粒子（在最底层）
+        for p in self.particles:
+            if p.kind == BLOOD:
+                # 计算alpha值的十六进制表示
+                alpha = format(p.attributes.get("alpha", 255), '02x')
+                color = f"#FF0000{alpha}"  # 红色加上透明度
+                frame.add_circle(Circle(p.x, p.y, p.attributes.get("size", BLOOD_PARTICLE_SIZE), color))
+        
+        # 3. 画敌人（普通敌人和精英敌人）
+        for p in self.particles:
+            if p.kind in [ENEMY, ENEMY_ELITE]:
+                if p.attributes.get("is_dying"):
+                    size = p.attributes.get("death_anim_size", ENEMY_SIZE if p.kind == ENEMY else ELITE_SIZE)
+                    color = "#FFFFFF" if p.attributes.get("death_anim_white") else (ENEMY_COLOR if p.kind == ENEMY else ELITE_COLOR)
+                    frame.add_circle(Circle(p.x, p.y, max(1, size), color))
+                else:
+                    if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
                         continue
-                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, PLAYER_COLOR))
-                    if p.health_system:
-                        bar_width = 40
-                        bar_height = 6
-                        hp_percent = p.health_system.current_hp / p.health_system.max_hp
-                        bar_x = p.x - bar_width // 2
-                        bar_y = p.y - PLAYER_SIZE - 12
-                        frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
-                        frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
-                elif p.kind == ENEMY:
-                    if p.attributes.get("is_dying"):
-                        size = p.attributes.get("death_anim_size", ENEMY_SIZE)
-                        color = "#FFFFFF" if p.attributes.get("death_anim_white") else ENEMY_COLOR
-                        frame.add_circle(Circle(p.x, p.y, max(1, size), color))
-                    else:
-                        if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
-                            continue
-                        frame.add_circle(Circle(p.x, p.y, ENEMY_SIZE, ENEMY_COLOR))
-                elif p.kind == ENEMY_ELITE:
-                    if p.attributes.get("is_dying"):
-                        size = p.attributes.get("death_anim_size", ELITE_SIZE)
-                        color = "#FFFFFF" if p.attributes.get("death_anim_white") else ELITE_COLOR
-                        frame.add_circle(Circle(p.x, p.y, max(1, size), color))
-                    else:
-                        if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
-                            continue
-                        frame.add_circle(Circle(p.x, p.y, ELITE_SIZE, ELITE_COLOR))
-                elif p.kind == WEAPON:
-                    weapon_name = p.attributes.get("weapon_name", "")
-                    weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
-                    weapon_size = weapon_type["size"] if weapon_type else WEAPON_SIZE
-                    shape = weapon_type.get("shape", "circle") if weapon_type else "circle"
-                    angle = p.attributes.get("angle", 0)
-                    if weapon_name == "MagicWand":
-                        inner_color = "#FFFFFF"
-                        outer_color = "#0055AA"
-                        wand_size = weapon_size * 0.5
-                        frame.add_circle(Circle(p.x, p.y, wand_size + 3, outer_color))
-                        frame.add_circle(Circle(p.x, p.y, wand_size, inner_color))
-                    elif weapon_name == "KingBible" and shape == "rectangle":
-                        side = weapon_size * 1.4
-                        shape_color = WEAPON_COLORS.get(weapon_name, WEAPON_COLOR)
-                        frame.add_rectangle(Rectangle(p.x - side/2, p.y - side/2, side, side, shape_color, angle))
-                    elif shape == "circle":
-                        frame.add_circle(Circle(p.x, p.y, weapon_size, shape_color))
-                    elif shape == "triangle":
-                        frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, shape_color, angle))
-                    elif shape == "cross":
-                        frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, shape_color, angle))
-                    elif shape == "rectangle":
-                        width = weapon_size * 3
-                        height = weapon_size * 0.5
-                        frame.add_rectangle(Rectangle(p.x - width/2, p.y - height/2, width, height, shape_color, angle))
-                elif p.kind == XP:
-                    frame.add_circle(Circle(p.x, p.y, XP_SIZE, XP_COLOR))
-                elif p.kind == DAMAGE_TEXT:
-                    alpha = p.attributes.get("alpha", 255)
-                    alpha_hex = format(int(alpha), '02x')
-                    text = p.attributes.get("text", "")
-                    size = p.attributes.get("size", 32)
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            if dx != 0 or dy != 0:
-                                frame.add_text(Text(
-                                    p.x + dx, p.y + dy, text, f"#000000{alpha_hex}", size
-                                ))
-                    damage_color = f"{p.attributes.get('color', '#FFFFFF')}{alpha_hex}"
-                    frame.add_text(Text(
-                        p.x, 
-                        p.y, 
-                        text, 
-                        damage_color, 
-                        size
-                    ))
-                elif p.kind == WEAPON and p.attributes.get("weapon_name") == "KingBible":
-                    frame.add_circle(Circle(p.x, p.y, int(WEAPON_SIZE*6.0), shape_color))
+                    size = ENEMY_SIZE if p.kind == ENEMY else ELITE_SIZE
+                    frame.add_circle(Circle(p.x, p.y, size + 1, "#FFFFFF"))
+                    frame.add_circle(Circle(p.x, p.y, size, ENEMY_COLOR if p.kind == ENEMY else ELITE_COLOR))
+        
+        # 4. 画经验球
+        for p in self.particles:
+            if p.kind == XP:
+                frame.add_circle(Circle(p.x, p.y, XP_SIZE, XP_COLOR))
+        
+        # 5. 画武器
+        for p in self.particles:
+            if p.kind == WEAPON:
+                weapon_name = p.attributes.get("weapon_name", "")
+                weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+                weapon_size = weapon_type["size"] if weapon_type else WEAPON_SIZE
+                shape = weapon_type.get("shape", "circle") if weapon_type else "circle"
+                angle = p.attributes.get("angle", 0)
+                
+                # 获取武器颜色
+                if weapon_name == "Knife" and p.attributes.get("is_knife"):
+                    main_color = p.attributes.get("main_color", "#FFFFFF")
+                    border_color = p.attributes.get("border_color", "#8B4513")
+                    shape_color = main_color
+                else:
+                    shape_color = WEAPON_COLORS.get(weapon_name, WEAPON_COLOR)
+                
+                # 特殊武器渲染
+                if weapon_name == "MagicWand":
+                    inner_color = "#FFFFFF"
+                    outer_color = "#0055AA"
+                    wand_size = weapon_size * 0.5
+                    frame.add_circle(Circle(p.x, p.y, wand_size + 3, outer_color))
+                    frame.add_circle(Circle(p.x, p.y, wand_size, inner_color))
+                elif weapon_name == "KingBible" and shape == "rectangle":
+                    side = weapon_size * 1.4
+                    frame.add_rectangle(Rectangle(p.x - side/2, p.y - side/2, side, side, shape_color, angle))
+                elif weapon_name == "Knife" and p.attributes.get("is_knife"):
+                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.4, border_color, angle))
+                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, main_color, angle))
+                elif weapon_name == "Axe":
+                    frame.add_circle(Circle(p.x, p.y, weapon_size * 0.9, "#FFA50044"))
+                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.26, "#000000"))
+                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, "#FFB700"))
+                    frame.add_cross(Cross(p.x, p.y, weapon_size * 0.75, "#FFFFFF"))
+                    frame.add_circle(Circle(p.x, p.y, weapon_size * 0.15, "#FFFFFF"))
+                elif shape == "circle":
+                    frame.add_circle(Circle(p.x, p.y, weapon_size, shape_color))
+                elif shape == "triangle":
+                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, shape_color, angle))
+                elif shape == "cross":
+                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, shape_color, angle))
+                elif shape == "rectangle":
+                    width = weapon_size * 3
+                    height = weapon_size * 0.5
+                    frame.add_rectangle(Rectangle(p.x - width/2, p.y - height/2, width, height, shape_color, angle))
+        
+        # 6. 画玩家（在最上层）
+        for p in self.particles:
+            if p.kind == PLAYER:
+                if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
                     continue
+                # 检查是否有伤害效果
+                if p.attributes.get("damage_effect_timer", 0) > 0:
+                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, "#FF0000"))  # 受伤时显示红色
+                else:
+                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, PLAYER_COLOR))
+                if p.health_system:
+                    bar_width = 40
+                    bar_height = 6
+                    hp_percent = p.health_system.current_hp / p.health_system.max_hp
+                    bar_x = p.x - bar_width // 2
+                    bar_y = p.y - PLAYER_SIZE - 12
+                    frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
+                    frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
+        
+        # 7. 画伤害数字（最顶层）
+        for p in self.particles:
+            if p.kind == DAMAGE_TEXT:
+                alpha = p.attributes.get("alpha", 255)
+                alpha_hex = format(int(alpha), '02x')
+                text = p.attributes.get("text", "")
+                size = p.attributes.get("size", 32)
+                for dx in [-1, 0, 1]:
+                    for dy in [-1, 0, 1]:
+                        if dx != 0 or dy != 0:
+                            frame.add_text(Text(
+                                p.x + dx, p.y + dy, text, f"#000000{alpha_hex}", size
+                            ))
+                damage_color = f"{p.attributes.get('color', '#FFFFFF')}{alpha_hex}"
+                frame.add_text(Text(
+                    p.x, 
+                    p.y, 
+                    text, 
+                    damage_color, 
+                    size
+                ))
+        
+        # 8. 根据游戏状态画UI
+        if self.game_state == STATE_UPGRADE_MENU:
             self.draw_upgrade_menu(frame)
-            return frame
         elif self.game_state == STATE_PLAYING:
             self.draw_hud(frame)
-            for p in self.particles:
-                if p.kind == PLAYER:
-                    # Skip drawing player if blinking and on blink frame
-                    if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
-                        continue
-                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, PLAYER_COLOR))
-                    # Draw health bar above player
-                    if p.health_system:
-                        bar_width = 40
-                        bar_height = 6
-                        hp_percent = p.health_system.current_hp / p.health_system.max_hp
-                        bar_x = p.x - bar_width // 2
-                        bar_y = p.y - PLAYER_SIZE - 12
-                        frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
-                        frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
-                elif p.kind == ENEMY:
-                    # 死亡动画：闪白+缩小
-                    if p.attributes.get("is_dying"):
-                        size = p.attributes.get("death_anim_size", ENEMY_SIZE)
-                        color = "#FFFFFF" if p.attributes.get("death_anim_white") else ENEMY_COLOR
-                        frame.add_circle(Circle(p.x, p.y, max(1, size), color))
-                    else:
-                        if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
-                            continue
-                        frame.add_circle(Circle(p.x, p.y, ENEMY_SIZE, ENEMY_COLOR))
-                elif p.kind == ENEMY_ELITE:
-                    if p.attributes.get("is_dying"):
-                        size = p.attributes.get("death_anim_size", ELITE_SIZE)
-                        color = "#FFFFFF" if p.attributes.get("death_anim_white") else ELITE_COLOR
-                        frame.add_circle(Circle(p.x, p.y, max(1, size), color))
-                    else:
-                        if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
-                            continue
-                        frame.add_circle(Circle(p.x, p.y, ELITE_SIZE, ELITE_COLOR))
-                elif p.kind == WEAPON:
-                    weapon_name = p.attributes.get("weapon_name", "")
-                    weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
-                    weapon_size = weapon_type["size"] if weapon_type else WEAPON_SIZE
-                    shape = weapon_type.get("shape", "circle") if weapon_type else "circle"
-                    angle = p.attributes.get("angle", 0)
-                    # 魔杖粒子特殊渲染：浅蓝圆+深蓝外圈
-                    if weapon_name == "MagicWand":
-                        inner_color = "#FFFFFF"  # 浅蓝
-                        outer_color = "#0055AA"  # 深蓝
-                        wand_size = weapon_size * 0.5
-                        frame.add_circle(Circle(p.x, p.y, wand_size + 3, outer_color))
-                        frame.add_circle(Circle(p.x, p.y, wand_size, inner_color))
-                    elif weapon_name == "KingBible" and shape == "rectangle":
-                        side = weapon_size * 1.4
-                        shape_color = WEAPON_COLORS.get(weapon_name, WEAPON_COLOR)
-                        frame.add_rectangle(Rectangle(p.x - side/2, p.y - side/2, side, side, shape_color, angle))
-                    elif shape == "circle":
-                        frame.add_circle(Circle(p.x, p.y, weapon_size, shape_color))
-                    elif shape == "triangle":
-                        frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, shape_color, angle))
-                    elif shape == "cross":
-                        frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, shape_color, angle))
-                    elif shape == "rectangle":
-                        width = weapon_size * 3
-                        height = weapon_size * 0.5
-                        frame.add_rectangle(Rectangle(p.x - width/2, p.y - height/2, width, height, shape_color, angle))
-                elif p.kind == XP:
-                    frame.add_circle(Circle(p.x, p.y, XP_SIZE, XP_COLOR))
-                elif p.kind == DAMAGE_TEXT:
-                    alpha = p.attributes.get("alpha", 255)
-                    alpha_hex = format(int(alpha), '02x')
-                    text = p.attributes.get("text", "")
-                    size = p.attributes.get("size", 32)
-                    # 黑色描边
-                    for dx in [-1, 0, 1]:
-                        for dy in [-1, 0, 1]:
-                            if dx != 0 or dy != 0:
-                                frame.add_text(Text(
-                                    p.x + dx, p.y + dy, text, f"#000000{alpha_hex}", size
-                                ))
-                    # 白色正字
-                    damage_color = f"{p.attributes.get('color', '#FFFFFF')}{alpha_hex}"
-                    frame.add_text(Text(
-                        p.x, 
-                        p.y, 
-                        text, 
-                        damage_color, 
-                        size
-                    ))
-                elif p.kind == WEAPON and p.attributes.get("weapon_name") == "KingBible":
-                    frame.add_circle(Circle(p.x, p.y, int(WEAPON_SIZE*6.0), shape_color))
-                    continue
-        
         elif self.game_state == STATE_START_MENU:
             self.draw_start_menu(frame)
         elif self.game_state == STATE_GAME_OVER:
             self.draw_game_over(frame)
+        
         return frame
         
     def draw_hud(self, frame):
@@ -803,6 +761,13 @@ class Game(BaseGame):
                 y >= rect_y and y <= rect_y + rect_height)
     
     def check_collision(self, particle1, particle2, size1, size2):
+        """Check if two particles are colliding"""
+        # 调试信息：检查飞刀颜色
+        if particle1.kind == WEAPON and particle1.attributes.get("weapon_name") == "Knife":
+            print(f"[DEBUG] 碰撞检测前飞刀 ID:{particle1.attributes.get('id')} 颜色:{particle1.attributes.get('main_color')}")
+        elif particle2.kind == WEAPON and particle2.attributes.get("weapon_name") == "Knife":
+            print(f"[DEBUG] 碰撞检测前飞刀 ID:{particle2.attributes.get('id')} 颜色:{particle2.attributes.get('main_color')}")
+
         # 优化：只检测屏幕内的粒子
         if getattr(particle1, 'attributes', {}).get('is_dying') or getattr(particle2, 'attributes', {}).get('is_dying'):
             return False
@@ -810,13 +775,39 @@ class Game(BaseGame):
             return False
         if not (0 <= particle2.x <= SPATIAL_RESOLUTION and 0 <= particle2.y <= SPATIAL_RESOLUTION):
             return False
-        # 对于KingBible，使用更大的碰撞范围
-        if particle1.kind == WEAPON and particle1.attributes.get("weapon_name") == "KingBible":
-            size1 = size1 * 3  # 增大圣经的碰撞范围（原来2倍，现3倍）
-        
+
+        # 对于武器，获取其实际尺寸
+        if particle1.kind == WEAPON:
+            weapon_name = particle1.attributes.get("weapon_name", "")
+            weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+            if weapon_type:
+                if weapon_name == "KingBible":
+                    size1 = weapon_type["size"] * 3  # 圣经使用3倍尺寸
+                elif weapon_name == "Knife":
+                    size1 = weapon_type["size"] * 1.5  # 飞刀使用1.5倍尺寸
+                elif weapon_name == "Axe":
+                    size1 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
+                else:
+                    size1 = weapon_type["size"]
+
+        if particle2.kind == WEAPON:
+            weapon_name = particle2.attributes.get("weapon_name", "")
+            weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+            if weapon_type:
+                if weapon_name == "KingBible":
+                    size2 = weapon_type["size"] * 3
+                elif weapon_name == "Knife":
+                    size2 = weapon_type["size"] * 1.5
+                elif weapon_name == "Axe":
+                    size2 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
+                else:
+                    size2 = weapon_type["size"]
+
         # 对于光环类武器(Garlic)，使用属性中指定的范围
         if particle1.kind == WEAPON and particle1.attributes.get("weapon_name") == "Garlic":
             size1 = particle1.attributes.get("aura_radius", size1)
+        if particle2.kind == WEAPON and particle2.attributes.get("weapon_name") == "Garlic":
+            size2 = particle2.attributes.get("aura_radius", size2)
             
         # 基本圆形碰撞检测
         dx = particle1.x - particle2.x
@@ -828,7 +819,8 @@ class Game(BaseGame):
         if collision and (particle1.kind == WEAPON or particle2.kind == WEAPON):
             weapon = particle1 if particle1.kind == WEAPON else particle2
             weapon_name = weapon.attributes.get("weapon_name", "未知")
-            print(f"检测到碰撞: {weapon_name} 距离: {distance:.2f}, 碰撞阈值: {(size1 + size2) / 2:.2f}")
+            if not weapon.attributes.get("is_knife", False):  # 只打印非飞刀的碰撞信息
+                print(f"检测到碰撞: {weapon_name} 距离: {distance:.2f}, 碰撞阈值: {(size1 + size2) / 2:.2f}")
             
         return collision
     
@@ -837,7 +829,6 @@ class Game(BaseGame):
         self.game_state = STATE_UPGRADE_MENU
         self.upgrade_anim_timer = 12  # 0.2秒动画
         # 生成烟花特效
-        import random
         self.upgrade_fireworks = []
         cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
         for _ in range(14):
@@ -878,7 +869,6 @@ class Game(BaseGame):
             "type": "stat_upgrade", 
             "display": "Attack Speed +10%"
         })
-        import random
         self.upgrade_options = random.sample(options, min(3, len(options)))
         print("生成升级选项: {}".format(self.upgrade_options))
         
@@ -1075,6 +1065,10 @@ class Game(BaseGame):
         self.next_id += 1
 
     def spawn_weapon(self, player_x, player_y, weapon_name, level, angle):
+        # 禁止用spawn_weapon发射Knife，强制用spawn_straight_shot
+        if weapon_name == "Knife":
+            print("[DEBUG] 禁止用spawn_weapon发射Knife，请用spawn_straight_shot")
+            return
         w = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
         if not w or level <= 0:
             return
@@ -1084,18 +1078,13 @@ class Game(BaseGame):
         distance = 50
         x = int(player_x + distance * math.cos(math.radians(angle)))
         y = int(player_y + distance * math.sin(math.radians(angle)))
-        
-        # 获取武器的形状属性
-        shape = w.get("shape", "circle")  # 默认为圆形
+        shape = w.get("shape", "circle")
         size = w["size"]
-        
-        # 根据武器类型调整特殊属性
         special_attrs = {}
         if shape == "rectangle":
-            special_attrs["width"] = size * 3  # 矩形武器（如鞭子）更长
+            special_attrs["width"] = size * 3
             special_attrs["height"] = size
-        
-        # 合并所有属性
+        # --- 修正：Knife带vx/vy ---
         attributes = {
             "damage": damage,
             "speed": WEAPON_SPEED,
@@ -1103,10 +1092,13 @@ class Game(BaseGame):
             "id": self.next_id,
             "weapon_name": weapon_name,
             "level": level,
-            "shape": shape,  # 添加形状属性
-            **special_attrs  # 添加特殊属性
+            "shape": shape,
+            **special_attrs
         }
-        
+        if weapon_name == "Knife":
+            rad = math.radians(angle)
+            attributes["vx"] = math.cos(rad) * WEAPON_SPEED
+            attributes["vy"] = math.sin(rad) * WEAPON_SPEED
         self.particles.append(
             Particle(
                 WEAPON,
@@ -1177,65 +1169,133 @@ class Game(BaseGame):
             )
             self.next_id += 1
 
-    def spawn_straight_shot(self, player, weapon_name, level):
+    def spawn_straight_shot(self, player, weapon_name, level, angle=None, amount=None):
         if level <= 0:
             return
-        angle = 0
-        damage = 7 + 2 * (level-1)
-        if damage <= 0:
-            damage = 1
-            
-        # 获取武器类型和形状
-        weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
-        shape = weapon_type.get("shape", "circle") if weapon_type else "circle"
-        
-        self.particles.append(
-            Particle(
+        # 1. 计算伤害和穿透力
+        knife_damage_table = [10, 10, 15, 15, 15, 15, 20, 20]
+        knife_pierce_table = [0, 0, 0, 0, 1, 1, 1, 2]
+        knife_amount_table = [1, 2, 3, 4, 4, 5, 6, 6]
+        idx = min(level, 8) - 1
+        damage = knife_damage_table[idx]
+        pierce = knife_pierce_table[idx]
+        # 如果没有指定amount，使用等级表中的值
+        if amount is None:
+            amount = knife_amount_table[idx]
+        # 2. 计算发射角度
+        if angle is None:
+            if self.last_move_dir[0] == 0 and self.last_move_dir[1] == 0:
+                angle = 0  # 默认向右
+            else:
+                angle = math.degrees(math.atan2(self.last_move_dir[1], self.last_move_dir[0]))
+        print(f"[DEBUG] 飞刀发射角度: {angle}, last_move_dir: {self.last_move_dir}")
+        # 3. 齐射角度错位
+        spread = 10  # 总扩散角度
+        if amount > 1:
+            base_angle = angle - spread/2
+            angle_step = spread / (amount-1) if amount > 1 else 0
+        else:
+            base_angle = angle
+            angle_step = 0
+        for i in range(amount):
+            shot_angle = base_angle + i * angle_step
+            rad = math.radians(shot_angle)
+            vx = math.cos(rad) * 14
+            vy = math.sin(rad) * 14
+            # 创建粒子
+            particle = Particle(
                 WEAPON,
                 player.x,
                 player.y,
                 attributes={
                     "damage": damage,
                     "speed": 14,
-                    "angle": angle,
+                    "angle": shot_angle,
                     "id": self.next_id,
                     "weapon_name": weapon_name,
                     "level": level,
-                    "vx": math.cos(math.radians(angle)),
-                    "vy": math.sin(math.radians(angle)),
-                    "duration": 60,
-                    "shape": shape
+                    "vx": vx,
+                    "vy": vy,
+                    "shape": "triangle",
+                    "pierce_count": pierce,
+                    "main_color": "#FFFFFF",  # 固定为白色主体
+                    "border_color": "#8B4513",  # 固定为褐色描边
+                    "is_knife": True,  # 标记为飞刀，防止其他逻辑修改颜色
+                    "color_locked": True,  # 添加颜色锁定标记
+                    "original_main_color": "#FFFFFF",  # 保存原始颜色
+                    "original_border_color": "#8B4513",  # 保存原始颜色
+                    "shape_color": "#FFFFFF"  # 设置shape_color为主体色
                 }
             )
-        )
-        self.next_id += 1
+            print(f"[DEBUG] 创建飞刀粒子 ID:{self.next_id} 颜色:{particle.attributes.get('main_color')}")
+            self.particles.append(particle)
+            self.next_id += 1
 
     def spawn_arc_throw(self, player, weapon_name, level, i, count):
         if level <= 0:
             return
-        angle = -60 + (120 // max(1, count-1)) * i if count > 1 else 0
-        speed = 10
-        damage = 12 + 3 * (level-1)
-        if damage <= 0:
-            damage = 1
-        self.particles.append(
-            Particle(
-                WEAPON,
-                player.x,
-                player.y,
-                attributes={
-                    "damage": damage,
-                    "speed": speed,
-                    "angle": angle,
-                    "id": self.next_id,
-                    "weapon_name": weapon_name,
-                    "level": level,
-                    "vx": speed * math.cos(math.radians(angle)),
-                    "vy": speed * math.sin(math.radians(angle)),
-                    "gravity": 0.5
-                }
-            )
+            
+        # 根据玩家移动方向决定基础角度
+        if self.last_move_dir[0] == 0 and self.last_move_dir[1] == 0:
+            # 静止时默认向右上抛出
+            if i == 0:
+                base_angle = 45  # 第一个斧子右上
+            else:
+                base_angle = 135  # 第二个斧子左上
+        else:
+            # 根据移动方向计算基础角度
+            move_angle = math.degrees(math.atan2(-self.last_move_dir[1], self.last_move_dir[0]))
+            if move_angle < 0:
+                move_angle += 360
+            # 移动时斧子总是投向移动方向的上方
+            if move_angle <= 90:  # 向右上移动
+                base_angle = 45
+            else:  # 向左上移动
+                base_angle = 135
+                
+        # 计算发射角度（在基础角度附近扇形分布）
+        angle = base_angle - 15 + (30 // max(1, count-1)) * i if count > 1 else base_angle
+        
+        # 基础速度和伤害（参考附件数值）
+        base_speed = 8  # 基础速度
+        damage = 20 if level == 1 else (40 if level <= 4 else (60 if level <= 7 else 80))
+            
+        # 转换角度为弧度
+        rad = math.radians(angle)
+        # 计算初始速度分量（添加向上的初速度）
+        vx = base_speed * math.cos(rad)
+        vy = -8  # 固定向上的初速度
+        
+        # 获取武器类型和形状
+        weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+        shape = weapon_type.get("shape", "cross") if weapon_type else "cross"
+        size = weapon_type["size"] if weapon_type else WEAPON_SIZE
+        
+        print(f"[DEBUG] Spawning Axe at ({player.x}, {player.y}) with vx={vx:.1f}, vy={vy:.1f}, angle={angle}")
+        
+        # 创建武器粒子
+        particle = Particle(
+            WEAPON,
+            player.x,
+            player.y,
+            attributes={
+                "damage": damage,
+                "speed": base_speed,
+                "angle": angle,
+                "id": self.next_id,
+                "weapon_name": weapon_name,
+                "level": level,
+                "vx": vx,
+                "vy": vy,
+                "gravity": 0.4,  # 增加重力加速度使抛物线更明显
+                "shape": shape,
+                "size": size,
+                "lifetime": 120,  # 生命周期限制（2秒）
+                "initial_y": player.y  # 记录初始Y坐标
+            }
         )
+        print(f"[DEBUG] Created Axe particle with ID {self.next_id}")
+        self.particles.append(particle)
         self.next_id += 1
 
     def spawn_boomerang(self, player, weapon_name, level):
@@ -1451,14 +1511,17 @@ class Game(BaseGame):
                 dy -= PLAYER_SPEED
             if actions[3]:  # Down
                 dy += PLAYER_SPEED
-
             # Normalize diagonal movement
             if dx != 0 and dy != 0:
-                dx *= 0.7071  # 1/sqrt(2)
+                dx *= 0.7071
                 dy *= 0.7071
-
             player.x = int(max(PLAYER_SIZE // 2, min(SPATIAL_RESOLUTION - PLAYER_SIZE // 2, player.x + dx)))
             player.y = int(max(PLAYER_SIZE // 2, min(SPATIAL_RESOLUTION - PLAYER_SIZE // 2, player.y + dy)))
+            # 记录移动方向
+            if dx != 0 or dy != 0:
+                norm = math.sqrt(dx*dx + dy*dy)
+                self.last_move_dir = (dx/norm, dy/norm)
+            print("[DEBUG] 玩家移动dx,dy:", dx, dy, "last_move_dir:", self.last_move_dir)
 
         # Update animation timers
         if self.hp_transition_timer > 0:
@@ -1474,6 +1537,18 @@ class Game(BaseGame):
             
         if self.player_blink_timer > 0:
             self.player_blink_timer -= 1
+            
+        # Update player invincible timer
+        if player.attributes.get("is_invincible", False):
+            invincible_timer = player.attributes.get("invincible_timer", 0)
+            if invincible_timer > 0:
+                player.attributes["invincible_timer"] = invincible_timer - 1
+            else:
+                player.attributes["is_invincible"] = False
+            
+        # Update damage effect timer
+        if player.attributes.get("damage_effect_timer", 0) > 0:
+            player.attributes["damage_effect_timer"] -= 1
             
         # Update enemy blink timers and knockback effects
         for enemy_type in [ENEMY, ENEMY_ELITE]:
@@ -1518,267 +1593,123 @@ class Game(BaseGame):
         for w in WEAPON_TYPES:
             name = w["name"]
             level = weapons.get(name, 0)
-            if level > 0:  # 只有等级大于0的武器才会生成粒子
-                cooldown_key = "{}_cooldown".format(name)
+            if level > 0:
+                cooldown_key = f"{name}_cooldown"
                 current_cooldown = player.attributes.get(cooldown_key, 0)
-                # 输出当前武器冷却情况
-                if self.game_timer % 60 == 0 and current_cooldown > 0:
-                    print(f"武器 {name} 当前冷却: {current_cooldown}")
+                # 飞刀特殊处理
+                if name == "Knife":
+                    # 飞刀等级表
+                    knife_amount_table = [1, 2, 3, 4, 4, 5, 6, 6]
+                    knife_interval_table = [6, 6, 6, 5, 5, 4, 3, 2]  # 间隔帧数（0.1s~0.04s）
+                    idx = min(level, 8) - 1
+                    amount = knife_amount_table[idx]
+                    interval = knife_interval_table[idx]
+                    # 发射序列状态
+                    if "knife_shot_seq" not in player.attributes:
+                        player.attributes["knife_shot_seq"] = None
+                    seq = player.attributes["knife_shot_seq"]
+                    if current_cooldown <= 0 and seq is None:
+                        # 冷却到0，初始化发射序列
+                        player.attributes["knife_shot_seq"] = {
+                            "amount": amount,
+                            "interval": interval,
+                            "next_shot": 0,
+                            "shots_left": amount,
+                            "base_angle": None  # 记录本轮齐射基准角度
+                        }
+                        player.attributes[cooldown_key] = 60  # 1秒冷却
+                        continue
+                    # 处理发射序列
+                    if seq is not None:
+                        if seq["shots_left"] > 0:
+                            if seq["next_shot"] <= 0:
+                                # 计算本轮齐射基准角度
+                                if seq["base_angle"] is None:
+                                    if self.last_move_dir[0] == 0 and self.last_move_dir[1] == 0:
+                                        base_angle = 0
+                                    else:
+                                        base_angle = math.degrees(math.atan2(self.last_move_dir[1], self.last_move_dir[0]))
+                                    seq["base_angle"] = base_angle
+                                else:
+                                    base_angle = seq["base_angle"]
+                                # 计算当前发射的角度
+                                shot_idx = amount - seq["shots_left"]
+                                spread = 10  # 总扩散角度
+                                if amount > 1:
+                                    angle_step = spread / (amount - 1)
+                                    shot_angle = base_angle - spread/2 + shot_idx * angle_step
+                                else:
+                                    shot_angle = base_angle
+                                # 加入随机扰动
+                                shot_angle += random.uniform(-2, 2)
+                                # 发射单个飞刀
+                                self.spawn_straight_shot(player, name, level, angle=shot_angle, amount=1)
+                                seq["shots_left"] -= 1
+                                seq["next_shot"] = seq["interval"]
+                            else:
+                                seq["next_shot"] -= 1
+                        if seq["shots_left"] <= 0:
+                            player.attributes["knife_shot_seq"] = None
+                        continue
+                    # 冷却递减
+                    if current_cooldown > 0:
+                        player.attributes[cooldown_key] -= 1
+                    continue
+                # 其它武器生成逻辑
                 if current_cooldown <= 0:
-                    print(f"生成武器 {name} (level {level})")
-                    if name == "KingBible":
-                        # 对于圣经武器，确保清理先前的粒子再生成新的
+                    # 根据武器类型调用不同的生成函数
+                    if name == "MagicWand":
+                        self.spawn_homing_missile(player, name, level)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "KingBible":
+                        # 获取当前等级的属性
                         lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
                         props = KING_BIBLE_LEVELS[lvl]
-                        amount = props["amount"]
+                        amount = max(1, props["amount"])
                         for i in range(amount):
                             self.spawn_orbiting_book(player, name, level, i, amount)
-                        # 使用KING_BIBLE_LEVELS中的冷却时间，而不是固定值
-                        # 转换为帧数 (秒 * 60)
-                        cooldown_seconds = 3.0  # 圣经冷却3秒
-                        player.attributes[cooldown_key] = int(cooldown_seconds * 60)
-                    else:
-                        count = 1 + sum(u.get("count", 0) for u in w["upgrade_table"][:level-1])
-                        for i in range(count):
-                            if w["behavior"] == "horizontal_slash":
-                                angle = 0 if i % 2 == 0 else 180
-                                self.spawn_weapon(player.x, player.y, name, level, angle)
-                            elif w["behavior"] == "homing_missile":
-                                self.spawn_homing_missile(player, name, level)
-                            elif w["behavior"] == "straight_shot":
-                                self.spawn_straight_shot(player, name, level)
-                            elif w["behavior"] == "arc_throw":
-                                self.spawn_arc_throw(player, name, level, i, count)
-                            elif w["behavior"] == "boomerang":
-                                self.spawn_boomerang(player, name, level)
-                            elif w["behavior"] == "orbit":
-                                self.spawn_orbiting_book(player, name, level, i, count)
-                            elif w["behavior"] == "fan_shot":
-                                self.spawn_fan_shot(player, name, level, i, count)
-                            elif w["behavior"] == "aura":
-                                self.spawn_aura(player, name, level)
-                            elif w["behavior"] == "whip":
-                                self.spawn_whip(player, name, level)
-                    base_cd = w["cooldown"]
-                    cd_bonus = sum(u.get("cooldown", 0) for u in w["upgrade_table"][:level-1])
-                    player.attributes[cooldown_key] = max(5, base_cd + cd_bonus)
-                else:
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "FireWand":
+                        # 获取当前等级的属性
+                        amount = 1 + sum(u.get("count", 0) for u in w["upgrade_table"][:max(0,level-1)])
+                        for i in range(amount):
+                            self.spawn_fan_shot(player, name, level, i, amount)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "Cross":
+                        self.spawn_boomerang(player, name, level)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "Garlic":
+                        self.spawn_aura(player, name, level)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "Whip":
+                        self.spawn_whip(player, name, level)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                    elif name == "Axe":
+                        amount = 1 + sum(u.get("count", 0) for u in w["upgrade_table"][:max(0,level-1)])
+                        for i in range(amount):
+                            self.spawn_arc_throw(player, name, level, i, amount)
+                        player.attributes[cooldown_key] = w["cooldown"]
+                # 冷却递减
+                if current_cooldown > 0:
                     player.attributes[cooldown_key] -= 1
+                continue
+        # ... existing code ...
 
         # Move and update weapons
-        player = self.get_particle(PLAYER)
-        
-        # 修改强制生成武器的部分，添加对圣经武器的特殊处理
-        # 每15秒手动强制生成一次所有武器，用于调试武器可见性
-        if self.game_timer % 900 == 1:
-            print("手动强制生成所有武器类型")
-            player = self.get_particle(PLAYER)
-            if player:
-                # 获取玩家武器
-                weapons = player.attributes.get("weapons", {})
-                
-                # 创建一个标志变量，记录是否已经生成过圣经
-                bible_generated = False
-                
-                # 强制生成所有等级大于0的武器
-                for w_type in WEAPON_TYPES:
-                    name = w_type["name"]
-                    level = weapons.get(name, 0)
-                    if level <= 0:  # 跳过等级为0的武器
-                        continue
-                        
-                    behavior = w_type["behavior"]
-                    
-                    # 对圣经武器做特殊处理，只生成一次
-                    if behavior == "orbit" and name == "KingBible":  # KingBible
-                        if not bible_generated:
-                            lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
-                            props = KING_BIBLE_LEVELS[lvl]
-                            amount = props["amount"]
-                            for i in range(amount):
-                                self.spawn_orbiting_book(player, name, level, i, amount)
-                            bible_generated = True
-                    elif behavior == "horizontal_slash":  # Whip
-                        self.spawn_whip(player, name, level)
-                    elif behavior == "homing_missile":  # MagicWand
-                        self.spawn_homing_missile(player, name, level)
-                    elif behavior == "straight_shot":  # Knife
-                        self.spawn_straight_shot(player, name, level)
-                    elif behavior == "arc_throw":  # Axe
-                        self.spawn_arc_throw(player, name, level, 0, 1)
-                    elif behavior == "boomerang":  # Cross
-                        self.spawn_boomerang(player, name, level)
-                    elif behavior == "fan_shot":  # FireWand
-                        self.spawn_fan_shot(player, name, level, 0, 1)
-                    elif behavior == "aura":  # Garlic
-                        self.spawn_aura(player, name, level)
-                print("已生成所有等级大于0的武器类型的粒子")
-                
-        # 每10秒手动强制生成一次圣经，用于调试
-        if self.game_timer % 600 == 1:
-            print("手动强制生成圣经武器")
-            player = self.get_particle(PLAYER)
-            if player:
-                # 确保玩家有圣经武器
-                weapons = player.attributes.get("weapons", {})
-                if "KingBible" not in weapons or weapons["KingBible"] <= 0:
-                    weapons["KingBible"] = 1
-                    player.attributes["weapons"] = weapons
-                    print("给玩家添加了圣经武器")
-                
-                # 强制生成圣经
-                level = weapons.get("KingBible", 1)
-                if level > 0:  # 确保等级大于0
-                    lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
-                    props = KING_BIBLE_LEVELS[lvl]
-                    amount = props["amount"]
-                    for i in range(amount):
-                        self.spawn_orbiting_book(player, "KingBible", level, i, amount)
-        
-        # Process weapon timers and remove expired weapons
         weapons_to_remove = []
         for weapon in self.get_particles(WEAPON):
             wname = weapon.attributes.get("weapon_name", "")
-            
-            # 基本移动逻辑 - 对于普通武器（不是orbit或特殊武器）
-            if "orbit_radius" not in weapon.attributes and "whip_timer" not in weapon.attributes and "duration" not in weapon.attributes:
-                # 如果没有vx和vy，使用角度和速度更新位置
-                if "vx" not in weapon.attributes and "vy" not in weapon.attributes:
-                    angle_rad = math.radians(weapon.attributes.get("angle", 0))
-                    speed = weapon.attributes.get("speed", WEAPON_SPEED)
-                    weapon.x += math.cos(angle_rad) * speed
-                    weapon.y += math.sin(angle_rad) * speed
-
-            # Process whip timer (for Whip weapon)
-            if "whip_timer" in weapon.attributes:
-                weapon.attributes["whip_timer"] -= 1
-                if weapon.attributes["whip_timer"] <= 0:
-                    weapons_to_remove.append(weapon)
-            
-            # Process duration timer (for KingBible, Garlic, etc.)
-            if "duration" in weapon.attributes:
-                weapon.attributes["duration"] -= 1
-                if weapon.attributes["duration"] <= 0:
-                    weapons_to_remove.append(weapon)
-            
-            # Process boomerang timer
-            if "boomerang_timer" in weapon.attributes:
-                weapon.attributes["boomerang_timer"] -= 1
-                # When timer reaches zero, reverse direction to return to player
-                if weapon.attributes["boomerang_timer"] == 0:
-                    if "vx" in weapon.attributes and "vy" in weapon.attributes:
-                        weapon.attributes["vx"] *= -1
-                        weapon.attributes["vy"] *= -1
-            
-            # Update orbit positions (for KingBible)
-            if "orbit_radius" in weapon.attributes and "orbit_angle" in weapon.attributes:
-                # 更新KingBible武器的目标冷却时间
-                if weapon.attributes.get("weapon_name") == "KingBible" and "hit_cooldown" in weapon.attributes:
-                    # 遍历所有敌人冷却，减少计时器
-                    cooldowns = weapon.attributes["hit_cooldown"]
-                    for eid in list(cooldowns.keys()):
-                        if cooldowns[eid] > 0:
-                            cooldowns[eid] -= 1
-                        else:
-                            del cooldowns[eid]  # 移除已过期的冷却
-                
-                # 找到正确的玩家
-                target_player = None
-                if player and player.attributes.get("id") == weapon.attributes.get("target_player_id", -1):
-                    target_player = player
-                else:
-                    # 如果当前玩家不是目标，尝试查找目标玩家
-                    for p in self.get_particles(PLAYER):
-                        if p.attributes.get("id") == weapon.attributes.get("target_player_id", -1):
-                            target_player = p
-                            break
-                
-                # 如果找到玩家，更新轨道位置
-                if target_player:
-                    # 更新轨道角度
-                    speed_factor = weapon.attributes.get("speed", 1.0)
-                    weapon.attributes["orbit_angle"] += 6 * speed_factor  # 旋转速度加倍
-                    
-                    # 计算新位置
-                    angle_rad = math.radians(weapon.attributes["orbit_angle"])
-                    radius = weapon.attributes["orbit_radius"]
-                    weapon.x = target_player.x + radius * math.cos(angle_rad)
-                    weapon.y = target_player.y + radius * math.sin(angle_rad)
-                else:
-                    # 如果找不到玩家，将武器标记为过期
-                    weapons_to_remove.append(weapon)
-            
-            # Update homing projectiles
-            if "target_id" in weapon.attributes or weapon.attributes.get("weapon_name") == "MagicWand":
-                # Find target enemy
-                target = None
-                for enemy_type in [ENEMY, ENEMY_ELITE]:
-                    for enemy in self.get_particles(enemy_type):
-                        if "target_id" in weapon.attributes and enemy.attributes.get("id") == weapon.attributes["target_id"]:
-                            target = enemy
-                            break
-                # If target exists, home in on it
-                if target:
-                    dx = target.x - weapon.x
-                    dy = target.y - weapon.y
-                    dist = math.sqrt(dx * dx + dy * dy)
-                    if dist > 0:
-                        dx = dx / dist * weapon.attributes.get("speed", WEAPON_SPEED)
-                        dy = dy / dist * weapon.attributes.get("speed", WEAPON_SPEED)
-                        weapon.x += dx
-                        weapon.y += dy
-                        weapon.attributes["angle"] = math.degrees(math.atan2(dy, dx))
-                        weapon.attributes["vx"] = dx
-                        weapon.attributes["vy"] = dy
-                        weapon.attributes["last_vx"] = dx
-                        weapon.attributes["last_vy"] = dy
-                else:
-                    # 目标消失则按原方向继续运动
-                    vx = weapon.attributes.get("vx", 0)
-                    vy = weapon.attributes.get("vy", 0)
-                    weapon.x += vx
-                    weapon.y += vy
-                    weapon.attributes["last_vx"] = vx
-                    weapon.attributes["last_vy"] = vy
-                # 超出边界移除
+            # Knife粒子只做直线运动，彻底避免被其他逻辑影响
+            if wname == "Knife" and "vx" in weapon.attributes and "vy" in weapon.attributes:
+                # 保护武器颜色
+                self.protect_weapon_colors(weapon)
+                weapon.x += weapon.attributes["vx"]
+                weapon.y += weapon.attributes["vy"]
                 if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
                     weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
-            # 魔杖粒子无target_id时直线运动
-            if wname == "MagicWand" and "target_id" not in weapon.attributes and "vx" in weapon.attributes and "vy" in weapon.attributes:
-                vx = weapon.attributes.get("vx", 0)
-                vy = weapon.attributes.get("vy", 0)
-                weapon.x += vx
-                weapon.y += vy
-                weapon.attributes["last_vx"] = vx
-                weapon.attributes["last_vy"] = vy
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
-                    weapons_to_remove.append(weapon)
-                continue
-        # 魔杖粒子碰撞穿透处理，击中第一个敌人后移除target_id
-        for weapon in self.get_particles(WEAPON):
-            if weapon.attributes.get("weapon_name") == "MagicWand":
-                for enemy_type in [ENEMY, ENEMY_ELITE]:
-                    for enemy in self.get_particles(enemy_type):
-                        if self.check_collision(weapon, enemy, WEAPON_SIZE, ENEMY_SIZE if enemy_type == ENEMY else ELITE_SIZE):
-                            # 先造成伤害
-                            self.apply_damage(weapon, enemy, weapon.attributes.get("damage", 1))
-                            # 只在首次穿透时移除target_id并设置vx/vy
-                            if "target_id" in weapon.attributes and not weapon.attributes.get("has_pierced"):
-                                weapon.attributes["has_pierced"] = True
-                                weapon.attributes.pop("target_id")
-                                weapon.attributes["vx"] = weapon.attributes.get("last_vx", 0)
-                                weapon.attributes["vy"] = weapon.attributes.get("last_vy", 0)
-                            # 穿透计数
-                            if "pierce_count" in weapon.attributes:
-                                weapon.attributes["pierce_count"] -= 1
-                                if weapon.attributes["pierce_count"] <= 0:
-                                    weapons_to_remove.append(weapon)
-                            else:
-                                weapons_to_remove.append(weapon)
-                            break
+            # 其余武器移动逻辑...（保持原有）
 
         # Remove expired weapons
         for weapon in weapons_to_remove:
@@ -1793,10 +1724,9 @@ class Game(BaseGame):
             for enemy in self.get_particles(enemy_type):
                 if enemy.attributes.get("is_dying"):
                     continue  # 死亡动画期间不移动
+                    
                 # 边界强制反弹修正
                 safe_margin = 10
-                center_x = SPATIAL_RESOLUTION / 2
-                center_y = SPATIAL_RESOLUTION / 2
                 if enemy.x < safe_margin:
                     enemy.x = safe_margin
                 if enemy.y < safe_margin:
@@ -1805,151 +1735,119 @@ class Game(BaseGame):
                     enemy.x = SPATIAL_RESOLUTION - safe_margin
                 if enemy.y > SPATIAL_RESOLUTION - safe_margin:
                     enemy.y = SPATIAL_RESOLUTION - safe_margin
+                    
                 # Calculate direction to player
                 dx = player.x - enemy.x
                 dy = player.y - enemy.y
                 dist = math.sqrt(dx * dx + dy * dy)
+                
                 # 如果方向为0，直接赋值为(1,1)
                 if dx == 0 and dy == 0:
                     dx, dy = 1, 1
                     dist = math.sqrt(2)
+                    
                 # Check if enemy should despawn due to distance
                 if dist > DESPAWN_DISTANCE:
                     enemies_to_remove.append(enemy)
                     continue
-                # Check if enemy is stuck (near corners or edges)
-                enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
-                is_stuck = False
-                margin = 5
-                if ((enemy.x < margin and enemy.y < margin) or  # top-left corner
-                   (enemy.x < margin and enemy.y > SPATIAL_RESOLUTION - margin) or  # bottom-left corner
-                   (enemy.x > SPATIAL_RESOLUTION - margin and enemy.y < margin) or  # top-right corner
-                   (enemy.x > SPATIAL_RESOLUTION - margin and enemy.y > SPATIAL_RESOLUTION - margin) or  # bottom-right corner
-                   (enemy.x < margin) or  # left edge
-                   (enemy.x > SPATIAL_RESOLUTION - margin) or  # right edge
-                   (enemy.y < margin) or  # top edge
-                   (enemy.y > SPATIAL_RESOLUTION - margin)):  # bottom edge
-                    is_stuck = True
-                # Make sure the direction vector is normalized
-                if dist < 1:
-                    dx = center_x - enemy.x
-                    dy = center_y - enemy.y
-                    norm = math.sqrt(dx * dx + dy * dy)
-                    if norm > 0:
-                        dx /= norm
-                        dy /= norm
+                    
+                # 处理敌人之间的碰撞
+                total_repulsion_x = 0
+                total_repulsion_y = 0
+                collision_count = 0
+                
+                # 检查与其他敌人的碰撞
+                for other_type in [ENEMY, ENEMY_ELITE]:
+                    for other in self.get_particles(other_type):
+                        if other == enemy or other.attributes.get("is_dying"):
+                            continue
+                            
+                        # 检查碰撞
+                        is_colliding, cdx, cdy, cdist = self.check_enemy_collision(enemy, other)
+                        if is_colliding:
+                            collision_count += 1
+                            # 计算排斥力（越近排斥力越大）
+                            if cdist > 0:
+                                # 使用非线性排斥力，让近距离排斥更强
+                                repulsion = 10 * (1.0 - cdist / ((ENEMY_SIZE + ENEMY_SIZE) * 1.5)) ** 2
+                                # 归一化方向向量
+                                total_repulsion_x -= (cdx / cdist) * repulsion
+                                total_repulsion_y -= (cdy / cdist) * repulsion
+                
+                # 如果发生碰撞，应用排斥力
+                if collision_count > 0:
+                    # 归一化总排斥力
+                    repulsion_magnitude = math.sqrt(total_repulsion_x**2 + total_repulsion_y**2)
+                    if repulsion_magnitude > 0:
+                        total_repulsion_x /= repulsion_magnitude
+                        total_repulsion_y /= repulsion_magnitude
+                        
+                        # 增加排斥力的影响权重
+                        dx = dx/dist * 0.3 + total_repulsion_x * 0.7
+                        dy = dy/dist * 0.3 + total_repulsion_y * 0.7
+                        
+                        # 重新归一化最终方向
+                        final_magnitude = math.sqrt(dx**2 + dy**2)
+                        if final_magnitude > 0:
+                            dx /= final_magnitude
+                            dy /= final_magnitude
                 else:
+                    # 没有碰撞时正常归一化方向
                     dx /= dist
                     dy /= dist
-                # 边界修正：如果靠近左上角等边界，强制向中心加大扰动
-                if (enemy.x < margin and enemy.y < margin) or (enemy.x < margin) or (enemy.y < margin):
-                    center_x = SPATIAL_RESOLUTION / 2
-                    center_y = SPATIAL_RESOLUTION / 2
-                    dx = (center_x - enemy.x) / SPATIAL_RESOLUTION + random.uniform(-0.3, 0.3)
-                    dy = (center_y - enemy.y) / SPATIAL_RESOLUTION + random.uniform(-0.3, 0.3)
-                    norm = math.sqrt(dx*dx + dy*dy)
-                    if norm > 0:
-                        dx /= norm
-                        dy /= norm
                 
-                # Only move enemy if not in knockback
-                if "knockback_timer" not in enemy.attributes or enemy.attributes["knockback_timer"] <= 0:
-                    # If stuck, apply special movement to help unstick
-                    if is_stuck:
-                        # Move toward center of screen if stuck at edge
-                        center_x = SPATIAL_RESOLUTION / 2
-                        center_y = SPATIAL_RESOLUTION / 2
-                        
-                        # Vector from enemy to center
-                        to_center_x = center_x - enemy.x
-                        to_center_y = center_y - enemy.y
-                        
-                        # Normalize
-                        to_center_dist = math.sqrt(to_center_x * to_center_x + to_center_y * to_center_y)
-                        if to_center_dist > 0:
-                            to_center_x /= to_center_dist
-                            to_center_y /= to_center_dist
-                        
-                        # Blend movement: 70% toward center, 30% toward player when stuck
-                        blended_dx = 0.7 * to_center_x + 0.3 * dx
-                        blended_dy = 0.7 * to_center_y + 0.3 * dy
-                        
-                        # Normalize blended direction
-                        blended_dist = math.sqrt(blended_dx * blended_dx + blended_dy * blended_dy)
-                        if blended_dist > 0:
-                            blended_dx /= blended_dist
-                            blended_dy /= blended_dist
-                        
-                        # Move with increased speed to escape edge
-                        next_x = enemy.x + blended_dx * enemy.attributes["speed"] * 1.5
-                        next_y = enemy.y + blended_dy * enemy.attributes["speed"] * 1.5
-                    else:
-                        # Normal movement toward player
-                        next_x = enemy.x + dx * enemy.attributes["speed"]
-                        next_y = enemy.y + dy * enemy.attributes["speed"]
-                    
-                    # Additional checks to prevent sticking at exact boundaries
-                    if (next_x <= 0 and dx < 0) or (next_x >= SPATIAL_RESOLUTION and dx > 0):
-                        # If moving toward edge, adjust position to prevent sticking
-                        next_x = max(enemy_size/2, min(SPATIAL_RESOLUTION - enemy_size/2, next_x))
-                        # Add slight random movement in y direction to help unstick
-                        next_y += random.uniform(-2, 2)
-                    
-                    if (next_y <= 0 and dy < 0) or (next_y >= SPATIAL_RESOLUTION and dy > 0):
-                        # If moving toward edge, adjust position to prevent sticking
-                        next_y = max(enemy_size/2, min(SPATIAL_RESOLUTION - enemy_size/2, next_y))
-                        # Add slight random movement in x direction to help unstick
-                        next_x += random.uniform(-2, 2)
-                    
-                    # Ensure enemy always stays within valid bounds (with small buffer)
-                    buffer = enemy_size / 4
-                    next_x = max(buffer, min(SPATIAL_RESOLUTION - buffer, next_x))
-                    next_y = max(buffer, min(SPATIAL_RESOLUTION - buffer, next_y))
-                    
-                    # Update enemy position
-                    enemy.x = next_x
-                    enemy.y = next_y
+                # Apply movement
+                speed = enemy.attributes.get("speed", 1) * ENEMY_SPEED_REDUCTION
+                if enemy.kind == ENEMY_ELITE:
+                    speed *= ELITE_SPEED_MULTIPLIER
+                
+                # 处理击退效果
+                knockback_timer = enemy.attributes.get("knockback_timer", 0)
+                if knockback_timer > 0:
+                    knockback_dx = enemy.attributes.get("knockback_dx", 0)
+                    knockback_dy = enemy.attributes.get("knockback_dy", 0)
+                    enemy.x += knockback_dx * KNOCKBACK_DISTANCE
+                    enemy.y += knockback_dy * KNOCKBACK_DISTANCE
+                    enemy.attributes["knockback_timer"] = knockback_timer - 1
+                else:
+                    # 正常移动（考虑碰撞后的方向）
+                    enemy.x += dx * speed
+                    enemy.y += dy * speed
 
                 # Check for collisions with player
-                if self.check_collision(player, enemy, PLAYER_SIZE, enemy_size):
-                    # Instead of instant reset, apply damage to player
-                    damage = enemy.attributes["damage"]
-                    
-                    # Store old HP value for section detection
-                    old_hp = player.health_system.current_hp if player.health_system else 0
-                    
-                    # Apply damage
-                    is_alive = self.apply_damage(enemy, player, damage)
-                    
-                    # Trigger damage effects
-                    if player.health_system:
-                        # Start HP animation transition
-                        self.hp_transition_timer = HP_TRANSITION_DURATION
-                        
-                        # Start player blink effect
+                if not player.attributes.get("is_invincible", False):
+                    # 根据敌人类型确定碰撞尺寸
+                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
+                    if self.check_collision(player, enemy, PLAYER_SIZE, enemy_size):
+                        # Apply damage to player
+                        damage = enemy.attributes.get("damage", 1)
+                        if enemy.kind == ENEMY_ELITE:
+                            damage *= 2  # Elite enemies deal double damage
+                        is_alive = self.apply_damage(enemy, player, damage)
+                        if not is_alive:
+                            self.game_state = STATE_GAME_OVER
+                            return
+                        # 添加流血效果
+                        self.spawn_blood_effect(player.x, player.y)
+                        # Make player invincible briefly
+                        player.attributes["is_invincible"] = True
+                        player.attributes["invincible_timer"] = 10  # 1 second at 60fps
+                        # Start player blinking effect
                         self.player_blink_timer = PLAYER_BLINK_DURATION
-                        
-                        # Check for HP section change
-                        new_section = int(player.health_system.current_hp / HP_THRESHOLD)
-                        if new_section < self.hp_section:
-                            # HP dropped to a new section, trigger blinking
-                            self.hp_blink_timer = HP_BLINK_DURATION
-                            self.hp_section = new_section
-                            # TODO: Play sound effect here once sound system is implemented
-                            print("HP section changed! Playing sound effect...")
-                    
-                    # Show game over if player dies
-                    if not is_alive:
-                        self.show_game_over()
-                        return
-                    
-                    # Move enemy away slightly to prevent continuous damage
-                    enemy.x = enemy.x - dx * 10
-                    enemy.y = enemy.y - dy * 10
+                        # Set player damage effect
+                        player.attributes["damage_effect_timer"] = 10  # 2 frames of red flash
+                        # Move enemy away slightly to prevent continuous damage
+                        enemy.x = enemy.x - dx * 10
+                        enemy.y = enemy.y - dy * 10
 
                 # Check for collisions with weapons
                 for weapon in self.get_particles(WEAPON):
+                    # 根据敌人类型确定碰撞尺寸
+                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
                     if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
+                        # 保护武器颜色
+                        self.protect_weapon_colors(weapon)
+                        
                         # Apply damage to enemy using health system
                         weapon_damage = weapon.attributes["damage"]
                         
@@ -1961,6 +1859,9 @@ class Game(BaseGame):
                         
                         # Apply damage using health system
                         is_alive = self.apply_damage(weapon, enemy, weapon_damage)
+                        
+                        # 再次保护武器颜色
+                        self.protect_weapon_colors(weapon)
                         
                         # Calculate actual damage dealt
                         if enemy.health_system:
@@ -1994,8 +1895,18 @@ class Game(BaseGame):
                             self.score += 10
                             
                             # 50% chance to drop XP (or always drop for elites)
-            # frame.add_text(Text(10, 180, "WASD to move", "#FFFFFF", 20))
-            
+                            if enemy.kind == ENEMY_ELITE or random.random() < XP_DROP_CHANCE:
+                                self.spawn_xp(enemy.x, enemy.y)
+                            # 开始死亡动画
+                            enemy.attributes["is_dying"] = True
+                            enemy.attributes["death_anim_timer"] = 30
+                            enemy.attributes["death_anim_size"] = enemy_size
+                            enemy.attributes["death_anim_white"] = False
+                        else:
+                            # 如果敌人还活着，确保飞刀颜色不变
+                            if weapon.attributes.get("weapon_name") == "Knife":
+                                self.protect_weapon_colors(weapon)
+
         # Note: Debug toolbar should only be drawn in draw_debug_toolbar method, not in step
 
         # 经验拾取判定
@@ -2104,12 +2015,48 @@ class Game(BaseGame):
                     weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
+            # 圣经的旋转移动
+            if wname == "KingBible":
+                # 获取目标玩家
+                target_player = None
+                for p in self.get_particles(PLAYER):
+                    if p.attributes.get("id") == weapon.attributes.get("target_player_id"):
+                        target_player = p
+                        break
+                if target_player:
+                    # 更新旋转角度
+                    orbit_angle = weapon.attributes.get("orbit_angle", 0)
+                    orbit_radius = weapon.attributes.get("orbit_radius", 60)
+                    speed = weapon.attributes.get("speed", 1.0)
+                    
+                    # 更新角度
+                    orbit_angle = (orbit_angle + speed * 3) % 360  # 3是旋转速度系数
+                    weapon.attributes["orbit_angle"] = orbit_angle
+                    
+                    # 计算新位置
+                    rad = math.radians(orbit_angle)
+                    weapon.x = target_player.x + orbit_radius * math.cos(rad)
+                    weapon.y = target_player.y + orbit_radius * math.sin(rad)
+                    
+                    # 更新武器角度（用于渲染）
+                    weapon.attributes["angle"] = orbit_angle
+                    
+                    # 检查持续时间
+                    if "duration" in weapon.attributes:
+                        weapon.attributes["duration"] -= 1
+                        if weapon.attributes["duration"] <= 0:
+                            weapons_to_remove.append(weapon)
+                else:
+                    weapons_to_remove.append(weapon)
+                continue
         # 魔杖粒子碰撞穿透处理，击中第一个敌人后移除target_id
         for weapon in self.get_particles(WEAPON):
             if weapon.attributes.get("weapon_name") == "MagicWand":
                 for enemy_type in [ENEMY, ENEMY_ELITE]:
                     for enemy in self.get_particles(enemy_type):
-                        if self.check_collision(weapon, enemy, WEAPON_SIZE, ENEMY_SIZE if enemy_type == ENEMY else ELITE_SIZE):
+                        # 根据敌人类型确定碰撞尺寸
+                        enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
+                        if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
                             # 先造成伤害
                             self.apply_damage(weapon, enemy, weapon.attributes.get("damage", 1))
                             # 只在首次穿透时移除target_id并设置vx/vy
@@ -2126,6 +2073,328 @@ class Game(BaseGame):
                             else:
                                 weapons_to_remove.append(weapon)
                             break
+
+        # Remove expired weapons
+        for weapon in weapons_to_remove:
+            if weapon in self.particles:  # Check if weapon still exists
+                self.remove_particle(weapon)
+                
+        # Move enemies towards player and check for despawning
+        enemies_to_remove = []
+        
+        # Process all types of enemies (regular and elite)
+        for enemy_type in [ENEMY, ENEMY_ELITE]:
+            for enemy in self.get_particles(enemy_type):
+                if enemy.attributes.get("is_dying"):
+                    continue  # 死亡动画期间不移动
+                    
+                # 边界强制反弹修正
+                safe_margin = 10
+                if enemy.x < safe_margin:
+                    enemy.x = safe_margin
+                if enemy.y < safe_margin:
+                    enemy.y = safe_margin
+                if enemy.x > SPATIAL_RESOLUTION - safe_margin:
+                    enemy.x = SPATIAL_RESOLUTION - safe_margin
+                if enemy.y > SPATIAL_RESOLUTION - safe_margin:
+                    enemy.y = SPATIAL_RESOLUTION - safe_margin
+                    
+                # Calculate direction to player
+                dx = player.x - enemy.x
+                dy = player.y - enemy.y
+                dist = math.sqrt(dx * dx + dy * dy)
+                
+                # 如果方向为0，直接赋值为(1,1)
+                if dx == 0 and dy == 0:
+                    dx, dy = 1, 1
+                    dist = math.sqrt(2)
+                    
+                # Check if enemy should despawn due to distance
+                if dist > DESPAWN_DISTANCE:
+                    enemies_to_remove.append(enemy)
+                    continue
+                    
+                # 处理敌人之间的碰撞
+                total_repulsion_x = 0
+                total_repulsion_y = 0
+                collision_count = 0
+                
+                # 检查与其他敌人的碰撞
+                for other_type in [ENEMY, ENEMY_ELITE]:
+                    for other in self.get_particles(other_type):
+                        if other == enemy or other.attributes.get("is_dying"):
+                            continue
+                            
+                        # 检查碰撞
+                        is_colliding, cdx, cdy, cdist = self.check_enemy_collision(enemy, other)
+                        if is_colliding:
+                            collision_count += 1
+                            # 计算排斥力（越近排斥力越大）
+                            if cdist > 0:
+                                # 使用非线性排斥力，让近距离排斥更强
+                                repulsion = 10 * (1.0 - cdist / ((ENEMY_SIZE + ENEMY_SIZE) * 1.2)) ** 2
+                                # 归一化方向向量
+                                total_repulsion_x -= (cdx / cdist) * repulsion
+                                total_repulsion_y -= (cdy / cdist) * repulsion
+                
+                # 如果发生碰撞，应用排斥力
+                if collision_count > 0:
+                    # 归一化总排斥力
+                    repulsion_magnitude = math.sqrt(total_repulsion_x**2 + total_repulsion_y**2)
+                    if repulsion_magnitude > 0:
+                        total_repulsion_x /= repulsion_magnitude
+                        total_repulsion_y /= repulsion_magnitude
+                        
+                        # 增加排斥力的影响权重
+                        dx = dx/dist * 0.3 + total_repulsion_x * 0.7
+                        dy = dy/dist * 0.3 + total_repulsion_y * 0.7
+                        
+                        # 重新归一化最终方向
+                        final_magnitude = math.sqrt(dx**2 + dy**2)
+                        if final_magnitude > 0:
+                            dx /= final_magnitude
+                            dy /= final_magnitude
+                else:
+                    # 没有碰撞时正常归一化方向
+                    dx /= dist
+                    dy /= dist
+                
+                # Apply movement
+                speed = enemy.attributes.get("speed", 1) * ENEMY_SPEED_REDUCTION
+                if enemy.kind == ENEMY_ELITE:
+                    speed *= ELITE_SPEED_MULTIPLIER
+                
+                # 处理击退效果
+                knockback_timer = enemy.attributes.get("knockback_timer", 0)
+                if knockback_timer > 0:
+                    knockback_dx = enemy.attributes.get("knockback_dx", 0)
+                    knockback_dy = enemy.attributes.get("knockback_dy", 0)
+                    enemy.x += knockback_dx * KNOCKBACK_DISTANCE
+                    enemy.y += knockback_dy * KNOCKBACK_DISTANCE
+                    enemy.attributes["knockback_timer"] = knockback_timer - 1
+                else:
+                    # 正常移动（考虑碰撞后的方向）
+                    enemy.x += dx * speed
+                    enemy.y += dy * speed
+
+                # Check for collisions with player
+                if not player.attributes.get("is_invincible", False):
+                    # 根据敌人类型确定碰撞尺寸
+                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
+                    if self.check_collision(player, enemy, PLAYER_SIZE, enemy_size):
+                        # Apply damage to player
+                        damage = enemy.attributes.get("damage", 1)
+                        if enemy.kind == ENEMY_ELITE:
+                            damage *= 2  # Elite enemies deal double damage
+                        is_alive = self.apply_damage(enemy, player, damage)
+                        if not is_alive:
+                            self.game_state = STATE_GAME_OVER
+                            return
+                        # 添加流血效果
+                        self.spawn_blood_effect(player.x, player.y)
+                        # Make player invincible briefly
+                        player.attributes["is_invincible"] = True
+                        player.attributes["invincible_timer"] = 10  # 1 second at 60fps
+                        # Start player blinking effect
+                        self.player_blink_timer = PLAYER_BLINK_DURATION
+                        # Set player damage effect
+                        player.attributes["damage_effect_timer"] = 10  # 2 frames of red flash
+                        # Move enemy away slightly to prevent continuous damage
+                        enemy.x = enemy.x - dx * 10
+                        enemy.y = enemy.y - dy * 10
+
+                # Check for collisions with weapons
+                for weapon in self.get_particles(WEAPON):
+                    # 根据敌人类型确定碰撞尺寸
+                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
+                    if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
+                        # 保护武器颜色
+                        self.protect_weapon_colors(weapon)
+                        
+                        # Apply damage to enemy using health system
+                        weapon_damage = weapon.attributes["damage"]
+                        
+                        # Store old HP value for damage calculation
+                        old_hp = enemy.health_system.current_hp if enemy.health_system else 0
+                        
+                        # Start enemy blinking effect
+                        enemy.attributes["blink_timer"] = PLAYER_BLINK_DURATION  # Use same duration as player
+                        
+                        # Apply damage using health system
+                        is_alive = self.apply_damage(weapon, enemy, weapon_damage)
+                        
+                        # 再次保护武器颜色
+                        self.protect_weapon_colors(weapon)
+                        
+                        # Calculate actual damage dealt
+                        if enemy.health_system:
+                            actual_damage = old_hp - enemy.health_system.current_hp
+                        else:
+                            actual_damage = weapon_damage
+                        
+                        # Apply knockback effect
+                        knockback_dx = enemy.x - player.x
+                        knockback_dy = enemy.y - player.y
+                        
+                        # Normalize direction vector
+                        knockback_dist = math.sqrt(knockback_dx * knockback_dx + knockback_dy * knockback_dy)
+                        if knockback_dist > 0:
+                            knockback_dx /= knockback_dist
+                            knockback_dy /= knockback_dist
+                        else:
+                            knockback_dx = random.uniform(-1, 1)
+                            knockback_dy = random.uniform(-1, 1)
+                        
+                        # Set knockback attributes
+                        enemy.attributes["knockback_timer"] = KNOCKBACK_DURATION
+                        enemy.attributes["knockback_dx"] = knockback_dx
+                        enemy.attributes["knockback_dy"] = knockback_dy
+                        
+                        # Create damage text particle
+                        self.spawn_damage_text(enemy.x, enemy.y, actual_damage)
+                        
+                        # If enemy died, handle it
+                        if not is_alive:
+                            self.score += 10
+                            
+                            # 50% chance to drop XP (or always drop for elites)
+                            if enemy.kind == ENEMY_ELITE or random.random() < XP_DROP_CHANCE:
+                                self.spawn_xp(enemy.x, enemy.y)
+                            # 开始死亡动画
+                            enemy.attributes["is_dying"] = True
+                            enemy.attributes["death_anim_timer"] = 30
+                            enemy.attributes["death_anim_size"] = enemy_size
+                            enemy.attributes["death_anim_white"] = False
+                        else:
+                            # 如果敌人还活着，确保飞刀颜色不变
+                            if weapon.attributes.get("weapon_name") == "Knife":
+                                self.protect_weapon_colors(weapon)
+
+        # Note: Debug toolbar should only be drawn in draw_debug_toolbar method, not in step
+
+        # 经验拾取判定
+        xp_to_remove = []
+        for xp in self.get_particles(XP):
+            if self.check_collision(player, xp, PLAYER_SIZE, XP_SIZE):
+                xp_value = 10  # 默认经验值
+                self.xp += xp_value
+                player.attributes["xp"] = self.xp
+                if self.xp >= self.xp_to_next_level:
+                    self.level += 1
+                    self.xp -= self.xp_to_next_level
+                    self.xp_to_next_level = self.level * 50
+                    print("玩家升级! 新等级: {}".format(self.level))
+                    self.show_upgrade_menu()
+                xp_to_remove.append(xp)
+        for xp in xp_to_remove:
+            self.remove_particle(xp)
+
+        # XP吸附效果
+        for xp in self.get_particles(XP):
+            dx = player.x - xp.x
+            dy = player.y - xp.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist < XP_MAGNET_RANGE:
+                # 吸附标记
+                xp.attributes["moving_to_player"] = True
+                # 计算吸附速度
+                speed = xp.attributes.get("speed", XP_MAGNET_SPEED_MIN)
+                speed = min(speed + XP_ACCELERATION, XP_MAGNET_SPEED_MAX)
+                xp.attributes["speed"] = speed
+                # 单位向量
+                if dist > 0:
+                    dx /= dist
+                    dy /= dist
+                # 更新位置
+                xp.x += dx * speed
+                xp.y += dy * speed
+            else:
+                # 未吸附时速度归零
+                xp.attributes["speed"] = XP_MAGNET_SPEED_MIN
+                xp.attributes["moving_to_player"] = False
+
+        # 死亡动画处理
+        dying_enemies = [e for e in self.particles if e.kind in [ENEMY, ENEMY_ELITE] and e.attributes.get("is_dying")]
+        for enemy in dying_enemies:
+            timer = enemy.attributes.get("death_anim_timer", 0)
+            if timer > 0:
+                enemy.attributes["death_anim_timer"] -= 1
+                progress = 1 - enemy.attributes["death_anim_timer"] / 30
+                # 尺寸缩小
+                if enemy.kind == ENEMY:
+                    enemy.attributes["death_anim_size"] = ENEMY_SIZE * (1 - progress)
+                else:
+                    enemy.attributes["death_anim_size"] = ELITE_SIZE * (1 - progress)
+                # 颜色闪白
+                enemy.attributes["death_anim_white"] = True
+            else:
+                if enemy in self.particles:
+                    self.remove_particle(enemy)
+
+        for weapon in self.get_particles(WEAPON):
+            wname = weapon.attributes.get("weapon_name", "")
+            # Knife粒子只做直线运动，彻底避免被其他逻辑影响
+            if wname == "Knife" and "vx" in weapon.attributes and "vy" in weapon.attributes:
+                # 保护武器颜色
+                self.protect_weapon_colors(weapon)
+                weapon.x += weapon.attributes["vx"]
+                weapon.y += weapon.attributes["vy"]
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                    weapons_to_remove.append(weapon)
+                continue
+            # 斧子的抛物线移动
+            if wname == "Axe" and "vx" in weapon.attributes and "vy" in weapon.attributes:
+                # 更新速度（重力影响）
+                weapon.attributes["vy"] += weapon.attributes["gravity"]
+                
+                # 更新位置
+                weapon.x += weapon.attributes["vx"]
+                weapon.y += weapon.attributes["vy"]
+                
+                # 更新旋转角度（根据移动方向）
+                current_angle = math.degrees(math.atan2(weapon.attributes["vy"], weapon.attributes["vx"]))
+                weapon.attributes["angle"] = current_angle
+                
+                # 检查生命周期
+                if "lifetime" in weapon.attributes:
+                    weapon.attributes["lifetime"] -= 1
+                    if weapon.attributes["lifetime"] <= 0:
+                        weapons_to_remove.append(weapon)
+                        continue
+                
+                # 检查是否超出屏幕边界
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                    weapons_to_remove.append(weapon)
+                continue
+            # 其他武器的移动逻辑...
+
+        # 更新血液粒子
+        blood_to_remove = []
+        for blood in self.get_particles(BLOOD):
+            # 更新位置
+            blood.x += blood.attributes["vx"]
+            blood.y += blood.attributes["vy"]
+            
+            # 减少生命周期
+            blood.attributes["lifetime"] -= 1
+            if blood.attributes["lifetime"] <= 0:
+                blood_to_remove.append(blood)
+            else:
+                # 逐渐降低不透明度
+                progress = 1 - blood.attributes["lifetime"] / BLOOD_PARTICLE_LIFETIME
+                blood.attributes["alpha"] = int(255 * (1 - progress))
+                # 减小速度（模拟阻力）
+                blood.attributes["vx"] *= 0.9
+                blood.attributes["vy"] *= 0.9
+                # 添加一点重力效果
+                blood.attributes["vy"] += 0.2
+        
+        # 移除过期的血液粒子
+        for blood in blood_to_remove:
+            if blood in self.particles:
+                self.remove_particle(blood)
 
     def agent_action(self, last_action=None):
         """
@@ -2388,6 +2657,10 @@ class Game(BaseGame):
         """
         应用伤害从攻击者到防御者
         """
+        # 调试信息：检查飞刀颜色
+        if attacker.kind == WEAPON and attacker.attributes.get("weapon_name") == "Knife":
+            print(f"[DEBUG] 伤害前飞刀 ID:{attacker.attributes.get('id')} 颜色:{attacker.attributes.get('main_color')}")
+
         # 圣经冷却处理，未真正造成伤害时直接return True，不显示跳字
         if attacker.attributes.get("weapon_name") == "KingBible":
             cooldowns = attacker.attributes.setdefault("hit_cooldown", {})
@@ -2414,6 +2687,10 @@ class Game(BaseGame):
             return is_alive
         else:
             return True
+
+        # 调试信息：再次检查飞刀颜色
+        if attacker.kind == WEAPON and attacker.attributes.get("weapon_name") == "Knife":
+            print(f"[DEBUG] 伤害后飞刀 ID:{attacker.attributes.get('id')} 颜色:{attacker.attributes.get('main_color')}")
 
     def get_kingbible_damage(self, level):
         if level <= 3:
@@ -2444,3 +2721,60 @@ class Game(BaseGame):
         else:
             if dead_particle in self.particles:
                 self.remove_particle(dead_particle)
+
+    def protect_weapon_colors(self, weapon):
+        """保护武器的颜色属性不被修改"""
+        if weapon.attributes.get("weapon_name") == "Knife" and weapon.attributes.get("is_knife"):
+            # 恢复飞刀的颜色
+            weapon.attributes["main_color"] = "#FFFFFF"
+            weapon.attributes["border_color"] = "#8B4513"
+            weapon.attributes["shape_color"] = "#FFFFFF"
+            weapon.attributes["color_locked"] = True
+            weapon.attributes["is_knife"] = True
+            weapon.attributes["original_main_color"] = "#FFFFFF"
+            weapon.attributes["original_border_color"] = "#8B4513"
+
+    def check_enemy_collision(self, enemy1, enemy2):
+        """检查两个敌人之间的距离，返回是否在排斥范围内以及相关向量"""
+        # 获取敌人尺寸
+        size1 = ELITE_SIZE if enemy1.kind == ENEMY_ELITE else ENEMY_SIZE
+        size2 = ELITE_SIZE if enemy2.kind == ENEMY_ELITE else ENEMY_SIZE
+        
+        # 计算两个敌人之间的距离
+        dx = enemy2.x - enemy1.x
+        dy = enemy2.y - enemy1.y
+        distance = math.sqrt(dx * dx + dy * dy)
+        
+        # 计算排斥范围（1.5倍敌人尺寸）
+        repulsion_range = (size1 + size2) * 1.2
+        
+        # 如果距离小于排斥范围，返回排斥信息
+        return distance < repulsion_range, dx, dy, distance
+
+    def spawn_blood_effect(self, x, y):
+        """在指定位置产生流血效果"""
+        for _ in range(BLOOD_PARTICLE_COUNT):
+            # 随机角度
+            angle = random.uniform(0, 2 * math.pi)
+            # 随机速度
+            speed = random.uniform(BLOOD_PARTICLE_SPEED * 0.5, BLOOD_PARTICLE_SPEED)
+            # 计算速度分量
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
+            
+            self.particles.append(
+                Particle(
+                    BLOOD,
+                    x,
+                    y,
+                    attributes={
+                        "id": self.next_id,
+                        "vx": vx,
+                        "vy": vy,
+                        "lifetime": BLOOD_PARTICLE_LIFETIME,
+                        "size": BLOOD_PARTICLE_SIZE,
+                        "alpha": 255  # 初始不透明度
+                    }
+                )
+            )
+            self.next_id += 1

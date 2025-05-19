@@ -41,6 +41,7 @@ class Circle:
     y: float
     radius: float
     color: str
+    is_filled: bool = True
     type: str = "circle"
 
 

@@ -53,8 +53,13 @@ class Server:
                         if 'x' in data and 'y' in data:
                             self.mouse_pos = (data['x'], data['y'])
                     else:
-                        # It's a keyboard event
-                        self.keys_pressed = data
+                        # It's a keyboard event - normalize key names
+                        normalized_keys = {}
+                        for key in data:
+                            # Convert key to lowercase for letter keys
+                            normalized_key = key.lower() if len(key) == 1 else key
+                            normalized_keys[normalized_key] = True
+                        self.keys_pressed = normalized_keys
                 except asyncio.TimeoutError:
                     pass
 
@@ -66,8 +71,7 @@ class Server:
             pass
 
     async def handle_index(self, request):
-        html = (
-            """
+        html = f"""
         <!DOCTYPE html>
         <html>
         <head>
@@ -79,8 +83,8 @@ class Server:
                 const canvas = document.getElementById('canvas');
                 const ctx = canvas.getContext('2d');
 
-                function drawObject(obj) {
-                    switch(obj.type) {
+                function drawObject(obj) {{
+                    switch(obj.type) {{
                         case 'sphere':
                             ctx.beginPath();
                             ctx.arc(obj.x, obj.y, obj.radius, 0, 2 * Math.PI);
@@ -94,7 +98,7 @@ class Server:
                             break;
 
                         case 'text':
-                            ctx.font = `${obj.font_size}px Arial`;
+                            ctx.font = `${{obj.font_size}}px Arial`;
                             ctx.fillStyle = obj.color;
                             ctx.fillText(obj.text, obj.x, obj.y);
                             break;
@@ -140,53 +144,53 @@ class Server:
                             
                             ctx.restore();
                             break;
-                    }
-                }
+                    }}
+                }}
 
-                function connectWebSocket() {
-                    const ws = new WebSocket(
-                        `ws://${window.location.hostname}:"""
-            + str(self.websocket_port)
-            + """`
-                    );
-                    const keysPressed = {};
+                function connectWebSocket() {{
+                    const ws = new WebSocket(`ws://${{window.location.hostname}}:{self.websocket_port}`);
+                    const keysPressed = {{}};
 
                     // Add key event listeners
-                    window.addEventListener('keydown', (event) => {
+                    window.addEventListener('keydown', (event) => {{
+                        // Prevent default behavior for game controls
+                        if (['w', 'a', 's', 'd', 'q', ' '].includes(event.key.toLowerCase())) {{
+                            event.preventDefault();
+                        }}
                         keysPressed[event.key] = true;
                         ws.send(JSON.stringify(keysPressed));
-                    });
+                    }});
 
-                    window.addEventListener('keyup', (event) => {
+                    window.addEventListener('keyup', (event) => {{
                         delete keysPressed[event.key];
                         ws.send(JSON.stringify(keysPressed));
-                    });
+                    }});
                     
                     // Add mouse event listeners
-                    canvas.addEventListener('mousemove', (event) => {
+                    canvas.addEventListener('mousemove', (event) => {{
                         const rect = canvas.getBoundingClientRect();
                         const x = event.clientX - rect.left;
                         const y = event.clientY - rect.top;
-                        ws.send(JSON.stringify({
+                        ws.send(JSON.stringify({{
                             type: 'mouse',
                             x: x,
                             y: y
-                        }));
-                    });
+                        }}));
+                    }});
                     
-                    canvas.addEventListener('click', (event) => {
+                    canvas.addEventListener('click', (event) => {{
                         const rect = canvas.getBoundingClientRect();
                         const x = event.clientX - rect.left;
                         const y = event.clientY - rect.top;
-                        ws.send(JSON.stringify({
+                        ws.send(JSON.stringify({{
                             type: 'mouse',
                             x: x,
                             y: y,
                             clicked: true
-                        }));
-                    });
+                        }}));
+                    }});
 
-                    ws.onmessage = function(event) {
+                    ws.onmessage = function(event) {{
                         const objects = JSON.parse(event.data);
 
                         // Clear canvas
@@ -194,24 +198,23 @@ class Server:
 
                         // Draw all objects
                         objects.forEach(drawObject);
-                    };
+                    }};
 
-                    ws.onclose = function() {
+                    ws.onclose = function() {{
                         console.log('WebSocket connection closed. Reconnecting...');
                         setTimeout(connectWebSocket, 1000);
-                    };
+                    }};
 
-                    ws.onerror = function(error) {
+                    ws.onerror = function(error) {{
                         console.error('WebSocket error:', error);
-                    };
-                }
+                    }};
+                }}
 
                 connectWebSocket();
             </script>
         </body>
         </html>
         """
-        )
         return web.Response(text=html, content_type="text/html")
 
     def start(self):

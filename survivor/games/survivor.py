@@ -46,8 +46,8 @@ WAVE_INTERVAL = FRAMES_PER_MINUTE  # One wave per minute
 SPAWN_DISTANCE = SPATIAL_RESOLUTION * 1.1  # Distance from player to spawn enemies
 KNOCKBACK_DISTANCE = 5  # Knockback distance in pixels
 KNOCKBACK_DURATION = 10  # Duration of knockback in frames
-DAMAGE_TEXT_DURATION = 60  # How long damage text stays visible in frames
-DAMAGE_TEXT_RISE = 30  # How far damage text rises before disappearing
+DAMAGE_TEXT_DURATION = 30  # 伤害数字持续时间（1秒 = 60帧）
+DAMAGE_TEXT_RISE = 50  # 伤害数字上升距离
 MIN_ENEMIES_PER_WAVE = 30  # 提高最小敌人数
 XP_DROP_CHANCE = 0.5  # 50% chance to drop XP when enemy dies
 ELITE_HEALTH_MULTIPLIER = 5  # Elite enemies have 5x normal health
@@ -198,6 +198,7 @@ WEAPON_TYPES = [
             {"count": 1}, {"area": 0.2}, {"cooldown": -8}, {"damage": 8}
         ]
     },
+
     {
         "name": "Cross",
         "display": "十字架",
@@ -218,7 +219,7 @@ WEAPON_TYPES = [
         "block_by_walls": False,
         "rarity": 1,
         "size": 14,
-        "shape": "cross",  # 十字架用十字形表示
+        "shape": "rectangle",  # 十字架用矩形表示
         "behavior": "boomerang",
         "upgrade_table": [
             {"damage": 3}, {"count": 1}, {"area": 0.2}, {"damage": 3},
@@ -234,8 +235,8 @@ WEAPON_TYPES = [
         "speed": 1.0,
         "amount": 1,
         "pierce": 1,
-        "duration": 3.0,
-        "cooldown": 180,
+        "duration": 4.0,  # 持续4秒
+        "cooldown": 180,  # 3秒冷却
         "projectile_interval": 0,
         "hitbox_delay": 0,
         "knockback": 1.0,
@@ -282,26 +283,32 @@ WEAPON_TYPES = [
         "name": "Garlic",
         "display": "大蒜",
         "max_level": 8,
-        "base_damage": 5,
-        "area": 1.0,
-        "speed": 1.0,
+        "base_damage": 5,  # Level 1 damage
+        "area": 1.0,  # Base area (100%)
+        "speed": 0,  # No speed needed for aura
         "amount": 1,
-        "pierce": 1,
+        "pierce": -1,  # AOE damage
         "duration": 1.0,
-        "cooldown": 30,
+        "cooldown": 78,  # 1.3s = 78 frames at 60fps
         "projectile_interval": 0,
         "hitbox_delay": 0,
-        "knockback": 1.0,
-        "pool_limit": 0,
+        "knockback": 0.5,
+        "pool_limit": -1,  # Unlimited targets (AOE)
         "chance": 0,
         "crit_multi": 1.0,
         "block_by_walls": False,
         "rarity": 1,
-        "size": 16,
+        "size": 50,  # Base size for aura
+        "shape": "circle",
         "behavior": "aura",
         "upgrade_table": [
-            {"damage": 2}, {"area": 0.2}, {"damage": 2}, {"area": 0.2},
-            {"damage": 2}, {"area": 0.2}, {"cooldown": -5}, {"damage": 4}
+            {"damage": 2},  # Level 2: 5+2 = 7
+            {"damage": 1, "cooldown": -6},  # Level 3: 7+1 = 8, cooldown -0.1s
+            {"damage": 1, "area": 0.2},  # Level 4: 8+1 = 9, area +20%
+            {"damage": 2, "cooldown": -6},  # Level 5: 9+2 = 11, cooldown -0.1s
+            {"damage": 1, "area": 0.2},  # Level 6: 11+1 = 12, area +20%
+            {"damage": 1, "cooldown": -6},  # Level 7: 12+1 = 13, cooldown -0.1s
+            {"damage": 2}  # Level 8: 13+2 = 15
         ]
     },
 ]
@@ -340,10 +347,26 @@ BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
 
 class Game(BaseGame):
     def __init__(self):
-        super().__init__(1000)  # Max 1000 particles
-        
-        # Game state constants
+        """Initialize the game"""
+        super().__init__(max_num_particles=1000)  # Initialize with max 1000 particles
+        self.particles = []
+        self.next_id = 0
         self.game_state = STATE_START_MENU
+        self.player_blink_timer = 0
+        self.show_debug_toolbar = True  # Initialize debug toolbar visibility flag
+        self.last_move_dir = [0, 0]  # Store last movement direction for weapon aiming
+        self.available_upgrades = []
+        self.selected_upgrade_index = 0
+        self.frame_count = 0
+        self.kill_count = 0
+        self.elite_kill_count = 0
+        self.last_spawn_time = 0
+        self.last_elite_spawn_time = 0
+        self.spawn_cooldown = 60
+        self.elite_spawn_cooldown = 300
+        self.wave_number = 0
+        self.last_wave_time = 0
+        self.wave_interval = 1800  # 30 seconds at 60fps
         
         # Score variables
         self.score = 0
@@ -363,14 +386,10 @@ class Game(BaseGame):
         self.hp_displayed = 100  # The smoothly displayed HP (for animation)
         self.hp_transition_timer = 0  # Timer for HP transition animation
         self.hp_blink_timer = 0  # Timer for HP blinking effect
-        self.player_blink_timer = 0  # Timer for player blinking effect
         self.hp_section = 5  # HP threshold sections (100/20 = 5 sections)
         
         # Upgrade menu variables
         self.upgrade_options = []
-        
-        # ID generator for entities
-        self.next_id = 0  
         
         # Mouse handling
         self.mouse_pos = (0, 0)
@@ -386,135 +405,216 @@ class Game(BaseGame):
         self.knife_projectile_timer = 0
     
     def get_frame(self):
-        """Create and return a Frame object with the current game state"""
+        """Get the current frame of the game"""
         frame = Frame()
-        # 1. 先画黑色底
+        
+        # 1. Draw background
         frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
         
-        # 2. 画血液粒子（在最底层）
-        for p in self.particles:
-            if p.kind == BLOOD:
-                # 计算alpha值的十六进制表示
-                alpha = format(p.attributes.get("alpha", 255), '02x')
-                color = f"#FF0000{alpha}"  # 红色加上透明度
-                frame.add_circle(Circle(p.x, p.y, p.attributes.get("size", BLOOD_PARTICLE_SIZE), color))
+        # 2. Draw blood particles (bottom layer)
+        for blood in self.get_particles(BLOOD):
+            alpha = format(blood.attributes.get("alpha", 255), '02x')
+            color = f"#FF0000{alpha}"  # Red with transparency
+            frame.add_circle(Circle(blood.x, blood.y, blood.attributes.get("size", BLOOD_PARTICLE_SIZE), color))
         
-        # 3. 画敌人（普通敌人和精英敌人）
-        for p in self.particles:
-            if p.kind in [ENEMY, ENEMY_ELITE]:
-                if p.attributes.get("is_dying"):
-                    size = p.attributes.get("death_anim_size", ENEMY_SIZE if p.kind == ENEMY else ELITE_SIZE)
-                    color = "#FFFFFF" if p.attributes.get("death_anim_white") else (ENEMY_COLOR if p.kind == ENEMY else ELITE_COLOR)
-                    frame.add_circle(Circle(p.x, p.y, max(1, size), color))
+        # 3. Draw aura effects (except Garlic)
+        garlic_weapons = []  # Store Garlic weapons for later rendering
+        for weapon in self.get_particles(WEAPON):
+            if weapon.attributes.get("is_aura"):
+                weapon_name = weapon.attributes.get("weapon_name")
+                if weapon_name == "Garlic":
+                    garlic_weapons.append(weapon)  # Collect Garlic weapons
+                    continue
                 else:
-                    if "blink_timer" in p.attributes and p.attributes["blink_timer"] > 0 and p.attributes["blink_timer"] % 4 >= 2:
-                        continue
-                    size = ENEMY_SIZE if p.kind == ENEMY else ELITE_SIZE
-                    frame.add_circle(Circle(p.x, p.y, size + 1, "#FFFFFF"))
-                    frame.add_circle(Circle(p.x, p.y, size, ENEMY_COLOR if p.kind == ENEMY else ELITE_COLOR))
+                    radius = weapon.attributes["aura_radius"]
+                    base_color = WEAPON_COLORS.get(weapon_name, "#FFFFFF")
+                    
+                    weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+                    if weapon_type:
+                        alpha = 0.3 + 0.1 * (1 - weapon.attributes["duration"] / weapon_type["cooldown"])
+                        
+                        if isinstance(base_color, dict):
+                            base_color = base_color.get("main", "#FFFFFF")
+                        
+                        # Normal aura drawing for other weapons
+                        frame.add_circle(Circle(
+                            weapon.x, weapon.y, radius,
+                            f"{base_color}{int(alpha * 255):02x}",
+                            is_filled=True
+                        ))
+                        frame.add_circle(Circle(
+                            weapon.x, weapon.y, radius,
+                            f"{base_color}88",
+                            is_filled=False
+                        ))
         
-        # 4. 画经验球
-        for p in self.particles:
-            if p.kind == XP:
-                frame.add_circle(Circle(p.x, p.y, XP_SIZE, XP_COLOR))
+        # Draw Garlic aura (only once per unique position)
+        rendered_positions = set()  # Track rendered positions
+        for weapon in garlic_weapons:
+            pos = (weapon.x, weapon.y)
+            if pos not in rendered_positions:
+                rendered_positions.add(pos)
+                radius = weapon.attributes.get("aura_radius")  # Use the radius we calculated in spawn_aura
+                if radius is None:  # Fallback only if radius is not set
+                    radius = WEAPON_SIZE * 2
+
+                # Draw red border on top
+                frame.add_circle(Circle(
+                    weapon.x, weapon.y, radius,
+                    self.get_garlic_border_color(weapon),  # 使用动态颜色
+                    is_filled=False
+                ))
         
-        # 5. 画武器
-        for p in self.particles:
-            if p.kind == WEAPON:
-                weapon_name = p.attributes.get("weapon_name", "")
+        # 4. Draw XP particles
+        for xp in self.get_particles(XP):
+            frame.add_circle(Circle(xp.x, xp.y, XP_SIZE, XP_COLOR))
+        
+        # 5. Draw enemies
+        for enemy_type in [ENEMY, ENEMY_ELITE]:
+            for enemy in self.get_particles(enemy_type):
+                if enemy.attributes.get("is_dying"):
+                    size = enemy.attributes.get("death_anim_size", ENEMY_SIZE if enemy_type == ENEMY else ELITE_SIZE)
+                    color = "#FFFFFF" if enemy.attributes.get("death_anim_white") else (ENEMY_COLOR if enemy_type == ENEMY else ELITE_COLOR)
+                    frame.add_circle(Circle(enemy.x, enemy.y, max(1, size), color))
+                else:
+                    # 检查是否处于受伤变白状态
+                    white_effect_timer = enemy.attributes.get("white_effect_timer", 0)
+                    if white_effect_timer > 0:
+                        enemy.attributes["white_effect_timer"] = white_effect_timer - 1
+                        color = "#FFFFFF"  # 受伤时显示为白色
+                    else:
+                        color = ENEMY_COLOR if enemy_type == ENEMY else ELITE_COLOR
+                    size = ENEMY_SIZE if enemy_type == ENEMY else ELITE_SIZE
+                    frame.add_circle(Circle(enemy.x, enemy.y, size + 1, "#FFFFFF"))  # 白色边框
+                    frame.add_circle(Circle(enemy.x, enemy.y, size, color))  # 主体颜色
+        
+        # 6. Draw weapons (except auras and Garlic)
+        for weapon in self.get_particles(WEAPON):
+            if not weapon.attributes.get("is_aura") and weapon.attributes.get("weapon_name") != "Garlic":
+                weapon_name = weapon.attributes.get("weapon_name", "")
                 weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
                 weapon_size = weapon_type["size"] if weapon_type else WEAPON_SIZE
                 shape = weapon_type.get("shape", "circle") if weapon_type else "circle"
-                angle = p.attributes.get("angle", 0)
+                angle = weapon.attributes.get("angle", 0)
                 
-                # 获取武器颜色
-                if weapon_name == "Knife" and p.attributes.get("is_knife"):
-                    main_color = p.attributes.get("main_color", "#FFFFFF")
-                    border_color = p.attributes.get("border_color", "#8B4513")
+                # Get weapon color
+                if weapon_name == "Knife" and weapon.attributes.get("is_knife"):
+                    main_color = weapon.attributes.get("main_color", "#FFFFFF")
+                    border_color = weapon.attributes.get("border_color", "#8B4513")
                     shape_color = main_color
                 else:
-                    shape_color = WEAPON_COLORS.get(weapon_name, WEAPON_COLOR)
+                    color_info = WEAPON_COLORS.get(weapon_name, "#FFFFFF")
+                    shape_color = color_info.get("main", color_info) if isinstance(color_info, dict) else color_info
                 
-                # 特殊武器渲染
+                # Draw weapon based on its shape
                 if weapon_name == "MagicWand":
-                    inner_color = "#FFFFFF"
+                    inner_color = "#3399FF"
                     outer_color = "#0055AA"
                     wand_size = weapon_size * 0.5
-                    frame.add_circle(Circle(p.x, p.y, wand_size + 3, outer_color))
-                    frame.add_circle(Circle(p.x, p.y, wand_size, inner_color))
+                    frame.add_circle(Circle(weapon.x, weapon.y, wand_size + 3, outer_color))
+                    frame.add_circle(Circle(weapon.x, weapon.y, wand_size, inner_color))
                 elif weapon_name == "KingBible" and shape == "rectangle":
-                    side = weapon_size * 1.4
-                    frame.add_rectangle(Rectangle(p.x - side/2, p.y - side/2, side, side, shape_color, angle))
-                elif weapon_name == "Knife" and p.attributes.get("is_knife"):
-                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.4, border_color, angle))
-                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, main_color, angle))
+                    current_size = weapon.attributes.get("current_size", weapon_size)
+                    side = current_size * 1.4
+                    frame.add_rectangle(Rectangle(weapon.x - side/2, weapon.y - side/2, side, side, shape_color, angle))
+                elif weapon_name == "Cross" and shape == "rectangle":
+                    # Calculate cross dimensions
+                    long_side = weapon_size * 2.0  # Long edge
+                    short_side = weapon_size * 0.4  # Short edge
+                    
+                    # Get self-rotation angle
+                    self_rotation = weapon.attributes.get("self_rotation", 0)
+                    
+                    # Calculate positions for four rectangles (forming a cross)
+                    segments = 4  # Each arm uses two rectangles
+                    segment_length = long_side / 2  # Length of each rectangle
+                    segment_width = short_side  # Width of rectangle
+                    
+                    for i in range(segments):
+                        angle = self_rotation + (i * 90)  # Place a rectangle every 90 degrees
+                        rad = math.radians(angle)
+                        
+                        # Calculate offset
+                        offset = segment_length / 2  # Distance to offset from center
+                        dx = math.cos(rad) * offset
+                        dy = math.sin(rad) * offset
+                        
+                        # Draw rectangle
+                        frame.add_rectangle(Rectangle(
+                            weapon.x + dx - segment_width/2,  # Center x + offset - width/2
+                            weapon.y + dy - segment_width/2,  # Center y + offset - width/2
+                            segment_length,  # Length
+                            segment_width,   # Width
+                            shape_color,
+                            angle  # Use current arm's angle
+                        ))
+                elif weapon_name == "Knife" and weapon.attributes.get("is_knife"):
+                    frame.add_triangle(Triangle(weapon.x, weapon.y, weapon_size * 1.4, border_color, angle))
+                    frame.add_triangle(Triangle(weapon.x, weapon.y, weapon_size * 1.2, main_color, angle))
                 elif weapon_name == "Axe":
-                    frame.add_circle(Circle(p.x, p.y, weapon_size * 0.9, "#FFA50044"))
-                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.26, "#000000"))
-                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, "#FFB700"))
-                    frame.add_cross(Cross(p.x, p.y, weapon_size * 0.75, "#FFFFFF"))
-                    frame.add_circle(Circle(p.x, p.y, weapon_size * 0.15, "#FFFFFF"))
+                    frame.add_circle(Circle(weapon.x, weapon.y, weapon_size * 0.9, "#FFA50044"))
+                    frame.add_cross(Cross(weapon.x, weapon.y, weapon_size * 1.26, "#000000"))
+                    frame.add_cross(Cross(weapon.x, weapon.y, weapon_size * 1.2, "#FFB700"))
+                    frame.add_cross(Cross(weapon.x, weapon.y, weapon_size * 0.75, "#FFFFFF"))
+                    frame.add_circle(Circle(weapon.x, weapon.y, weapon_size * 0.15, "#FFFFFF"))
                 elif shape == "circle":
-                    frame.add_circle(Circle(p.x, p.y, weapon_size, shape_color))
+                    frame.add_circle(Circle(weapon.x, weapon.y, weapon_size, shape_color))
                 elif shape == "triangle":
-                    frame.add_triangle(Triangle(p.x, p.y, weapon_size * 1.2, shape_color, angle))
+                    frame.add_triangle(Triangle(weapon.x, weapon.y, weapon_size * 1.2, shape_color, angle))
                 elif shape == "cross":
-                    frame.add_cross(Cross(p.x, p.y, weapon_size * 1.2, shape_color, angle))
+                    frame.add_cross(Cross(weapon.x, weapon.y, weapon_size * 1.2, shape_color, angle))
                 elif shape == "rectangle":
                     width = weapon_size * 3
                     height = weapon_size * 0.5
-                    frame.add_rectangle(Rectangle(p.x - width/2, p.y - height/2, width, height, shape_color, angle))
+                    frame.add_rectangle(Rectangle(weapon.x - width/2, weapon.y - height/2, width, height, shape_color, angle))
         
-        # 6. 画玩家（在最上层）
-        for p in self.particles:
-            if p.kind == PLAYER:
-                if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
-                    continue
-                # 检查是否有伤害效果
-                if p.attributes.get("damage_effect_timer", 0) > 0:
-                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, "#FF0000"))  # 受伤时显示红色
-                else:
-                    frame.add_circle(Circle(p.x, p.y, PLAYER_SIZE, PLAYER_COLOR))
-                if p.health_system:
-                    bar_width = 40
-                    bar_height = 6
-                    hp_percent = p.health_system.current_hp / p.health_system.max_hp
-                    bar_x = p.x - bar_width // 2
-                    bar_y = p.y - PLAYER_SIZE - 12
-                    frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
-                    frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
+        # 7. Draw player (top layer)
+        for player in self.get_particles(PLAYER):
+            if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
+                continue
+            if player.attributes.get("damage_effect_timer", 0) > 0:
+                frame.add_circle(Circle(player.x, player.y, PLAYER_SIZE, "#FF0000"))
+            else:
+                frame.add_circle(Circle(player.x, player.y, PLAYER_SIZE, PLAYER_COLOR))
+            
+            if player.health_system:
+                bar_width = 40
+                bar_height = 6
+                hp_percent = player.health_system.current_hp / player.health_system.max_hp
+                bar_x = player.x - bar_width // 2
+                bar_y = player.y - PLAYER_SIZE - 12
+                frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
+                frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, 
+                    "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
         
-        # 7. 画伤害数字（最顶层）
-        for p in self.particles:
-            if p.kind == DAMAGE_TEXT:
-                alpha = p.attributes.get("alpha", 255)
-                alpha_hex = format(int(alpha), '02x')
-                text = p.attributes.get("text", "")
-                size = p.attributes.get("size", 32)
-                for dx in [-1, 0, 1]:
-                    for dy in [-1, 0, 1]:
-                        if dx != 0 or dy != 0:
-                            frame.add_text(Text(
-                                p.x + dx, p.y + dy, text, f"#000000{alpha_hex}", size
-                            ))
-                damage_color = f"{p.attributes.get('color', '#FFFFFF')}{alpha_hex}"
-                frame.add_text(Text(
-                    p.x, 
-                    p.y, 
-                    text, 
-                    damage_color, 
-                    size
-                ))
+        # 8. Draw damage numbers (very top layer)
+        for damage_text in self.get_particles(DAMAGE_TEXT):
+            alpha = damage_text.attributes.get("alpha", 255)
+            scale = damage_text.attributes.get("scale", 1.0)
+            base_size = 24  # 基础字号
+            current_size = int(base_size * scale)  # 应用缩放
+            alpha_hex = format(alpha, '02x')
+            
+            # 使用固定的白色，只改变透明度
+            frame.add_text(Text(
+                damage_text.x,
+                damage_text.y,
+                damage_text.attributes["text"],
+                f"#FFFFFF{alpha_hex}",  # 固定白色，只改变透明度
+                current_size
+            ))
         
-        # 8. 根据游戏状态画UI
+        # 9. Draw UI based on game state
         if self.game_state == STATE_UPGRADE_MENU:
             self.draw_upgrade_menu(frame)
-        elif self.game_state == STATE_PLAYING:
-            self.draw_hud(frame)
         elif self.game_state == STATE_START_MENU:
             self.draw_start_menu(frame)
         elif self.game_state == STATE_GAME_OVER:
             self.draw_game_over(frame)
+        elif self.game_state == STATE_PLAYING:
+            self.draw_hud(frame)
+            if self.show_debug_toolbar:
+                self.draw_debug_toolbar(frame)
         
         return frame
         
@@ -544,6 +644,9 @@ class Game(BaseGame):
     
     def draw_debug_toolbar(self, frame):
         """Draw the debug toolbar at the bottom of the screen"""
+        if not self.show_debug_toolbar:
+            return
+            
         # Background for debug toolbar
         toolbar_y = SCREEN_HEIGHT - DEBUG_TOOLBAR_HEIGHT
         frame.add_rectangle(Rectangle(0, toolbar_y, SCREEN_WIDTH, DEBUG_TOOLBAR_HEIGHT, "#333333"))
@@ -554,9 +657,11 @@ class Game(BaseGame):
         # Get player weapon levels
         player = self.get_particle(PLAYER)
         if not player:
+            print("[DEBUG] No player found in draw_debug_toolbar")
             return
             
         weapons = player.attributes.get("weapons", {})
+        print(f"[DEBUG] Drawing toolbar with weapons: {weapons}")
         
         # Draw weapon level controls
         for i, weapon_type in enumerate(WEAPON_TYPES):
@@ -571,15 +676,30 @@ class Game(BaseGame):
             weapon_text = f"{display_name}: {level}"
             frame.add_text(Text(button_x, toolbar_y + 15, weapon_text, "#FFFFFF", DEBUG_FONT_SIZE - 2))
             
-            # Draw - button
+            # Draw - button with hover effect
             button_x_minus = button_x
-            frame.add_rectangle(Rectangle(button_x_minus, toolbar_y + 20, DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT, "#AA0000"))
-            frame.add_text(Text(button_x_minus + 15, toolbar_y + 40, "-", "#FFFFFF", DEBUG_FONT_SIZE))
+            is_minus_hovered = self.is_point_in_rect(
+                self.mouse_pos[0], self.mouse_pos[1],
+                button_x_minus, toolbar_y + 20,
+                DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
+            )
+            minus_color = "#CC0000" if is_minus_hovered else "#AA0000"
+            frame.add_rectangle(Rectangle(button_x_minus, toolbar_y + 20, DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT, minus_color))
+            frame.add_text(Text(button_x_minus + DEBUG_BUTTON_WIDTH/2 - 5, toolbar_y + 40, "-", "#FFFFFF", DEBUG_FONT_SIZE))
             
-            # Draw + button
+            # Draw + button with hover effect
             button_x_plus = button_x_minus + DEBUG_BUTTON_WIDTH + 2
-            frame.add_rectangle(Rectangle(button_x_plus, toolbar_y + 20, DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT, "#00AA00"))
-            frame.add_text(Text(button_x_plus + 15, toolbar_y + 40, "+", "#FFFFFF", DEBUG_FONT_SIZE))
+            is_plus_hovered = self.is_point_in_rect(
+                self.mouse_pos[0], self.mouse_pos[1],
+                button_x_plus, toolbar_y + 20,
+                DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
+            )
+            plus_color = "#00CC00" if is_plus_hovered else "#00AA00"
+            frame.add_rectangle(Rectangle(button_x_plus, toolbar_y + 20, DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT, plus_color))
+            frame.add_text(Text(button_x_plus + DEBUG_BUTTON_WIDTH/2 - 5, toolbar_y + 40, "+", "#FFFFFF", DEBUG_FONT_SIZE))
+            
+            if is_minus_hovered or is_plus_hovered:
+                print(f"[DEBUG] {weapon_name} button hover - Minus: {is_minus_hovered}, Plus: {is_plus_hovered}")
 
     def initialize_game(self):
         """Initialize game state without resetting score, etc."""
@@ -647,10 +767,39 @@ class Game(BaseGame):
         self.level = 1
         self.xp = 0
         self.xp_to_next_level = self.level * 50
-        self.last_reset = 0
-        self.game_state = STATE_PLAYING
         self.game_timer = 0
-        self.initialize_game()
+        self.current_wave = 0
+        self.min_enemies_per_wave = MIN_ENEMIES_PER_WAVE
+        self.next_spawn_timer = 0
+        self.wave_timer = WAVE_INTERVAL
+        self.elite_spawned = False
+        self.particles = []
+        self.next_id = 0
+        self.player_blink_timer = 0
+        self.last_move_dir = [0, 0]
+        self.available_upgrades = []
+        self.selected_upgrade_index = 0
+        self.frame_count = 0
+        self.kill_count = 0
+        self.elite_kill_count = 0
+        self.last_spawn_time = 0
+        self.last_elite_spawn_time = 0
+        self.spawn_cooldown = 60
+        self.elite_spawn_cooldown = 300
+        self.wave_number = 0
+        self.last_wave_time = 0
+        self.wave_interval = 1800
+        
+        # Keep debug toolbar state
+        debug_toolbar_state = self.show_debug_toolbar
+        
+        # Create player
+        self.create_player()
+        
+        # Restore debug toolbar state
+        self.show_debug_toolbar = debug_toolbar_state
+        
+        print(f"[DEBUG] Game reset. Debug toolbar state: {self.show_debug_toolbar}")
         
     def format_time(self, frames):
         """Convert frame count to time string (MM:SS)"""
@@ -661,97 +810,147 @@ class Game(BaseGame):
         
     def handle_input(self, actions=None, mouse_pos=None, mouse_clicked=False):
         """Handle input for various game states"""
+        if actions is None:
+            actions = []
+            
+        # Toggle debug toolbar with F3 key
+        if "q" in actions:
+            self.toggle_debug_toolbar()
+            print("[DEBUG] Debug toolbar toggled:", self.show_debug_toolbar)
+            
         self.mouse_pos = mouse_pos if mouse_pos else (0, 0)
         self.mouse_clicked = mouse_clicked
         
+        # Print mouse info when clicked
+        if self.mouse_clicked:
+            print(f"[DEBUG] Mouse clicked at: ({self.mouse_pos[0]}, {self.mouse_pos[1]})")
+        
         if self.game_state == STATE_START_MENU:
-            # Check if start button was clicked
-            if self.mouse_clicked and self.is_point_in_rect(
-                self.mouse_pos[0], self.mouse_pos[1],
-                SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-                SCREEN_HEIGHT // 2 + 50,
-                BUTTON_WIDTH, BUTTON_HEIGHT
-            ):
-                self.game_state = STATE_PLAYING
-                self.reset_game()
-                
-        elif self.game_state == STATE_UPGRADE_MENU:
-            # Check if any upgrade option was clicked
-            for i, option in enumerate(self.upgrade_options):
-                button_y = SCREEN_HEIGHT // 2 - 50 + i * (BUTTON_HEIGHT + 20)
-                if self.mouse_clicked and self.is_point_in_rect(
+            # Handle start menu input
+            if self.mouse_clicked:
+                # Check if mouse is over start button
+                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
+                button_y = SPATIAL_RESOLUTION // 2 - 30
+                if self.is_point_in_rect(
                     self.mouse_pos[0], self.mouse_pos[1],
-                    SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-                    button_y,
+                    button_x, button_y,
                     BUTTON_WIDTH, BUTTON_HEIGHT
                 ):
-                    self.selected_upgrade = option
+                    print("[DEBUG] Start button clicked!")
+                    self.reset_game()
                     self.game_state = STATE_PLAYING
-                    # Apply the upgrade
-                    self.apply_upgrade(option)
-                    break
-                    
-        elif self.game_state == STATE_GAME_OVER:
-            # Check if restart button was clicked
-            if self.mouse_clicked and self.is_point_in_rect(
-                self.mouse_pos[0], self.mouse_pos[1],
-                SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-                SCREEN_HEIGHT // 2 + 80,
-                BUTTON_WIDTH, BUTTON_HEIGHT
-            ):
-                self.game_state = STATE_PLAYING
-                self.reset_game()
-                return
         
         elif self.game_state == STATE_PLAYING:
-            # Handle debug toolbar button clicks
-            if self.mouse_clicked:
-                player = self.get_particle(PLAYER)
-                if player:
-                    weapons = player.attributes.get("weapons", {})
+            # Get player particle
+            player = self.get_particle(PLAYER)
+            if not player:
+                print("[DEBUG] No player found!")
+                return
+            
+            # Handle debug toolbar clicks if visible
+            if self.show_debug_toolbar and self.mouse_clicked:
+                toolbar_y = SCREEN_HEIGHT - DEBUG_TOOLBAR_HEIGHT
+                weapons = player.attributes.get("weapons", {})
+                
+                print(f"[DEBUG] Current weapons: {weapons}")
+                print(f"[DEBUG] Toolbar Y: {toolbar_y}")
+                
+                # Check each weapon's buttons
+                for i, weapon_type in enumerate(WEAPON_TYPES):
+                    weapon_name = weapon_type["name"]
+                    level = weapons.get(weapon_name, 0)
+                    button_x = 200 + i * (DEBUG_BUTTON_WIDTH * 2 + DEBUG_BUTTON_SPACING)
                     
-                    # Calculate toolbar starting position
-                    toolbar_y = SCREEN_HEIGHT - DEBUG_TOOLBAR_HEIGHT
+                    # Print button positions for debugging
+                    print(f"[DEBUG] {weapon_name} buttons - Minus: ({button_x}, {toolbar_y + 20}), Plus: ({button_x + DEBUG_BUTTON_WIDTH + 2}, {toolbar_y + 20})")
                     
-                    for i, weapon_type in enumerate(WEAPON_TYPES):
-                        weapon_name = weapon_type["name"]
-                        # Each weapon has two buttons (-/+), starting after title (x=200)
-                        button_x_minus = 200 + i * (DEBUG_BUTTON_WIDTH * 2 + DEBUG_BUTTON_SPACING)
-                        button_x_plus = button_x_minus + DEBUG_BUTTON_WIDTH + 2
-                        
-                        # Check if decrease level button was clicked
+                    # Check minus button
+                    if self.is_point_in_rect(
+                        self.mouse_pos[0], self.mouse_pos[1],
+                        button_x, toolbar_y + 20,
+                        DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
+                    ):
+                        print(f"[DEBUG] Minus button clicked for {weapon_name}")
+                        if level > 0:
+                            weapons[weapon_name] = max(0, level - 1)
+                            player.attributes["weapons"] = weapons.copy()  # Make a copy to ensure update
+                            print(f"[DEBUG] Decreased {weapon_name} level to {weapons[weapon_name]}")
+                            print(f"[DEBUG] Updated weapons: {player.attributes['weapons']}")
+                        return actions
+                    
+                    # Check plus button
+                    button_x_plus = button_x + DEBUG_BUTTON_WIDTH + 2
+                    if self.is_point_in_rect(
+                        self.mouse_pos[0], self.mouse_pos[1],
+                        button_x_plus, toolbar_y + 20,
+                        DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
+                    ):
+                        print(f"[DEBUG] Plus button clicked for {weapon_name}")
+                        max_level = next((w["max_level"] for w in WEAPON_TYPES if w["name"] == weapon_name), 8)
+                        if level < max_level:
+                            if weapon_name not in weapons:
+                                weapons[weapon_name] = 1
+                            else:
+                                weapons[weapon_name] = min(max_level, level + 1)
+                            player.attributes["weapons"] = weapons.copy()  # Make a copy to ensure update
+                            print(f"[DEBUG] Increased {weapon_name} level to {weapons[weapon_name]}")
+                            print(f"[DEBUG] Updated weapons: {player.attributes['weapons']}")
+                        return actions
+            
+            # Handle movement
+            dx = 0
+            dy = 0
+            speed = PLAYER_SPEED
+            
+            if "UP" in actions:
+                dy -= speed
+            if "DOWN" in actions:
+                dy += speed
+            if "LEFT" in actions:
+                dx -= speed
+            if "RIGHT" in actions:
+                dx += speed
+            
+            # Store movement direction for weapon aiming
+            if dx != 0 or dy != 0:
+                self.last_move_dir = [dx, dy]
+            
+            # Apply movement
+            player.x = max(0, min(SPATIAL_RESOLUTION, player.x + dx))
+            player.y = max(0, min(SPATIAL_RESOLUTION, player.y + dy))
+        
+        elif self.game_state == STATE_UPGRADE_MENU:
+            # Handle upgrade menu input
+            if self.upgrade_options:
+                cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+                if self.mouse_clicked:
+                    # Check if mouse is over any upgrade button
+                    for i, upgrade in enumerate(self.upgrade_options):
+                        button_y = cy - 50 + i * (BUTTON_HEIGHT + 20)
+                        button_x = cx - BUTTON_WIDTH // 2
                         if self.is_point_in_rect(
                             self.mouse_pos[0], self.mouse_pos[1],
-                            button_x_minus, toolbar_y + 20,
-                            DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
+                            button_x, button_y,
+                            BUTTON_WIDTH, BUTTON_HEIGHT
                         ):
-                            # Decrease weapon level
-                            current_level = weapons.get(weapon_name, 0)
-                            if current_level > 0:
-                                if current_level == 1:
-                                    weapons.pop(weapon_name, None)  # Remove weapon if level is 1
-                                else:
-                                    weapons[weapon_name] = current_level - 1
-                                print(f"Decreased {weapon_name} level to {weapons.get(weapon_name, 0)}")
-                                
-                        # Check if increase level button was clicked
-                        elif self.is_point_in_rect(
-                            self.mouse_pos[0], self.mouse_pos[1],
-                            button_x_plus, toolbar_y + 20,
-                            DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT
-                        ):
-                            # Increase weapon level
-                            current_level = weapons.get(weapon_name, 0)
-                            max_level = weapon_type["max_level"]
-                            if current_level < max_level:
-                                if current_level == 0:
-                                    weapons[weapon_name] = 1  # Add weapon at level 1 if it doesn't exist
-                                else:
-                                    weapons[weapon_name] = current_level + 1
-                                print(f"Increased {weapon_name} level to {weapons[weapon_name]}")
-                    
-                    # Update player weapons attribute
-                    player.attributes["weapons"] = weapons
+                            print(f"Selected upgrade: {upgrade}")  # Debug print
+                            self.apply_upgrade(upgrade)
+                            self.game_state = STATE_PLAYING
+                            break
+                elif "UP" in actions:
+                    self.selected_upgrade_index = (self.selected_upgrade_index - 1) % len(self.upgrade_options)
+                elif "DOWN" in actions:
+                    self.selected_upgrade_index = (self.selected_upgrade_index + 1) % len(self.upgrade_options)
+                elif "SPACE" in actions:
+                    # Apply selected upgrade
+                    self.apply_upgrade(self.upgrade_options[self.selected_upgrade_index])
+                    self.game_state = STATE_PLAYING
+        
+        elif self.game_state == STATE_GAME_OVER:
+            # Handle game over input
+            if "SPACE" in actions or self.mouse_clicked:
+                self.reset_game()
+                self.game_state = STATE_START_MENU
         
         return actions
     
@@ -762,12 +961,7 @@ class Game(BaseGame):
     
     def check_collision(self, particle1, particle2, size1, size2):
         """Check if two particles are colliding"""
-        # 调试信息：检查飞刀颜色
-        if particle1.kind == WEAPON and particle1.attributes.get("weapon_name") == "Knife":
-            print(f"[DEBUG] 碰撞检测前飞刀 ID:{particle1.attributes.get('id')} 颜色:{particle1.attributes.get('main_color')}")
-        elif particle2.kind == WEAPON and particle2.attributes.get("weapon_name") == "Knife":
-            print(f"[DEBUG] 碰撞检测前飞刀 ID:{particle2.attributes.get('id')} 颜色:{particle2.attributes.get('main_color')}")
-
+    
         # 优化：只检测屏幕内的粒子
         if getattr(particle1, 'attributes', {}).get('is_dying') or getattr(particle2, 'attributes', {}).get('is_dying'):
             return False
@@ -787,6 +981,8 @@ class Game(BaseGame):
                     size1 = weapon_type["size"] * 1.5  # 飞刀使用1.5倍尺寸
                 elif weapon_name == "Axe":
                     size1 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
+                elif weapon_name == "Cross":
+                    size1 = weapon_type["size"] * 2.0  # 十字架使用2倍尺寸，与显示大小匹配
                 else:
                     size1 = weapon_type["size"]
 
@@ -800,6 +996,8 @@ class Game(BaseGame):
                     size2 = weapon_type["size"] * 1.5
                 elif weapon_name == "Axe":
                     size2 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
+                elif weapon_name == "Cross":
+                    size2 = weapon_type["size"] * 2.0  # 十字架使用2倍尺寸，与显示大小匹配
                 else:
                     size2 = weapon_type["size"]
 
@@ -828,6 +1026,7 @@ class Game(BaseGame):
         """Show the upgrade menu with weapon options"""
         self.game_state = STATE_UPGRADE_MENU
         self.upgrade_anim_timer = 12  # 0.2秒动画
+        self.selected_upgrade_index = 0  # Initialize selection index
         # 生成烟花特效
         self.upgrade_fireworks = []
         cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
@@ -885,8 +1084,27 @@ class Game(BaseGame):
             name = upgrade["name"]
             level = weapons.get(name, 1)
             if level < next((w["max_level"] for w in WEAPON_TYPES if w["name"] == name), 8):
+                # Update weapon level
                 weapons[name] = level + 1
                 print("升级武器 {} 到等级 {}".format(name, level+1))
+                
+                # Remove existing weapon particles of this type
+                weapons_to_remove = [w for w in self.get_particles(WEAPON) 
+                                   if w.attributes.get("weapon_name") == name and 
+                                   w.attributes.get("target_player_id") == player.attributes["id"]]
+                for weapon in weapons_to_remove:
+                    if weapon in self.particles:
+                        self.remove_particle(weapon)
+                
+                # Reset cooldown for this weapon
+                cooldown_key = f"{name}_cooldown"
+                weapon_type = next((w for w in WEAPON_TYPES if w["name"] == name), None)
+                if weapon_type:
+                    player.attributes[cooldown_key] = 0  # Reset cooldown to trigger immediate respawn
+                    
+                    # For Garlic, immediately recreate with new stats
+                    if name == "Garlic":
+                        self.spawn_aura(player, name, level + 1)
                 
         elif upgrade["type"] == "new_weapon":
             # 新武器
@@ -1026,7 +1244,8 @@ class Game(BaseGame):
                     "id": self.next_id,
                     "blink_timer": 0,
                     "wave": self.current_wave,
-                    "xp_value": 30
+                    "xp_value": 30,
+                    "white_effect_timer": 0  # 初始化受伤变白效果计时器
                 }
             )
         )
@@ -1045,20 +1264,22 @@ class Game(BaseGame):
         spawn_x = max(-ENEMY_SIZE, min(SCREEN_WIDTH + ENEMY_SIZE, spawn_x))
         spawn_y = max(-ENEMY_SIZE, min(SCREEN_HEIGHT + ENEMY_SIZE, spawn_y))
         enemy_health = 10
+        enemy_speed = random.randint(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX)
         self.particles.append(
             Particle(
                 ENEMY,
                 spawn_x,
                 spawn_y,
                 attributes={
-                    "speed": random.randint(ENEMY_SPEED_MIN, ENEMY_SPEED_MAX),
+                    "speed": enemy_speed,
                     "base_hp": enemy_health,
                     "max_hp": enemy_health,
                     "damage": 1,
                     "id": self.next_id,
                     "blink_timer": 0,
                     "wave": self.current_wave,
-                    "xp_value": 10
+                    "xp_value": 10,
+                    "white_effect_timer": 0  # 初始化受伤变白效果计时器
                 }
             )
         )
@@ -1298,12 +1519,46 @@ class Game(BaseGame):
         self.particles.append(particle)
         self.next_id += 1
 
-    def spawn_boomerang(self, player, weapon_name, level):
-        # 十字架：直线飞行后回旋
-        angle = 0
-        
-        # 增加打印输出
-        print(f"生成回旋武器 {weapon_name} (level {level})")
+    def spawn_boomerang(self, player, weapon_name, level, angle=None):
+        # 如果没有指定角度，寻找最近的敌人
+        if angle is None:
+            nearest_enemy = None
+            min_dist = float('inf')
+            for enemy_type in [ENEMY, ENEMY_ELITE]:
+                for enemy in self.get_particles(enemy_type):
+                    dx = enemy.x - player.x
+                    dy = enemy.y - player.y
+                    dist = math.sqrt(dx * dx + dy * dy)
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_enemy = enemy
+
+            # 如果找到敌人，计算发射角度；否则默认向右
+            if nearest_enemy:
+                angle = math.degrees(math.atan2(nearest_enemy.y - player.y, nearest_enemy.x - player.x))
+            else:
+                angle = 0
+
+        # 根据等级获取属性
+        base_damage = 10
+        if level >= 2:
+            base_damage = 20
+        if level >= 5:
+            base_damage = 30
+        if level >= 8:
+            base_damage = 40
+
+        # 计算速度倍率
+        speed_multiplier = 1.0
+        if level >= 3:
+            speed_multiplier = 1.25
+        if level >= 6:
+            speed_multiplier = 1.5
+
+        # 基础速度
+        base_speed = 8 * speed_multiplier
+
+        rad = math.radians(angle)
         
         # 创建武器粒子
         self.particles.append(
@@ -1312,19 +1567,29 @@ class Game(BaseGame):
                 player.x,
                 player.y,
                 attributes={
-                    "damage": 10 + 2 * (level-1),
-                    "speed": 12,
+                    "damage": base_damage,
+                    "speed": base_speed,
                     "angle": angle,
                     "id": self.next_id,
                     "weapon_name": weapon_name,
                     "level": level,
-                    "vx": math.cos(math.radians(angle)),
-                    "vy": math.sin(math.radians(angle)),
-                    "boomerang_timer": 30,  # 30帧后回旋
-                    "duration": 90  # 添加持续时间，确保武器粒子不会太快被移除
+                    "vx": math.cos(rad) * base_speed,
+                    "vy": math.sin(rad) * base_speed,
+                    "initial_vx": math.cos(rad) * base_speed,  # 记录初始速度
+                    "initial_vy": math.sin(rad) * base_speed,
+                    "ax": 0,  # 初始加速度为0
+                    "ay": 0,
+                    "original_speed": base_speed,
+                    "has_hit": False,  # 是否已击中敌人
+                    "is_returning": False,  # 是否在返回
+                    "pierce_count": 999,  # 无限穿透
+                    "duration": 300,  # 5秒持续时间
+                    "self_rotation": random.uniform(0, 360),  # 随机初始角度
+                    "rotation_speed": 24  # 每帧旋转24度
                 }
             )
         )
+        print(f"生成十字架 ID:{self.next_id} 角度:{angle:.1f} 速度:{base_speed:.1f}")
         self.next_id += 1
 
     def spawn_orbiting_book(self, player, weapon_name, level, i, count):
@@ -1366,7 +1631,10 @@ class Game(BaseGame):
                 "level": level,
                 "orbit_radius": radius,
                 "orbit_angle": angle,
-                "duration": int(3.0 * 60),
+                "duration": int(4.0 * 60),  # 4秒持续时间
+                "total_duration": int(4.0 * 60),  # 保存总持续时间
+                "original_size": weapon_type["size"],  # 保存原始尺寸
+                "current_size": weapon_type["size"],  # 当前尺寸（用于淡出动画）
                 "target_player_id": player.attributes["id"],
                 "hit_cooldown": {},
                 "shape": shape
@@ -1408,9 +1676,51 @@ class Game(BaseGame):
     def spawn_aura(self, player, weapon_name, level):
         if level <= 0:
             return
-        damage = 5 + 2 * (level-1)
-        if damage <= 0:
-            damage = 1
+            
+        # Get weapon configuration
+        weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon_name), None)
+        if not weapon_type:
+            return
+            
+        # Calculate base damage and area
+        base_damage = weapon_type["base_damage"]
+        base_size = weapon_type["size"]  # Base size for aura
+        
+        # Calculate level-based stats
+        damage = base_damage
+        area_multiplier = 1.0  # Start with base multiplier (100%)
+        pool_limit = weapon_type["pool_limit"]
+        
+        # Apply upgrades based on level
+        print(f"[DEBUG] Garlic Level {level} - Processing upgrades:")
+        upgrades_to_process = min(level - 1, len(weapon_type["upgrade_table"]))  # Make sure we don't exceed the upgrade table
+        for i in range(upgrades_to_process):
+            upgrade = weapon_type["upgrade_table"][i]
+            print(f"[DEBUG] Processing upgrade {i+1}: {upgrade}")
+            if "damage" in upgrade:
+                damage += upgrade["damage"]
+            if "area" in upgrade:
+                old_multiplier = area_multiplier
+                area_multiplier += upgrade["area"]  # Add area upgrade multipliers (20% = 0.2)
+                print(f"[DEBUG] Area multiplier updated: {old_multiplier} -> {area_multiplier}")
+            if "pool_limit" in upgrade:
+                if upgrade["pool_limit"] == -1:
+                    pool_limit = -1  # Unlimited targets
+                else:
+                    pool_limit += upgrade["pool_limit"]
+        
+        # Calculate final aura radius with area multiplier
+        aura_radius = base_size * area_multiplier
+        print(f"[DEBUG] Final Garlic stats - Base Size: {base_size}, Area Multiplier: {area_multiplier}, Final Radius: {aura_radius}")
+        
+        # Remove existing Garlic auras for this player
+        existing_garlic = [w for w in self.get_particles(WEAPON) 
+                          if w.attributes.get("weapon_name") == "Garlic" and 
+                          w.attributes.get("target_player_id") == player.attributes["id"]]
+        for old_garlic in existing_garlic:
+            self.remove_particle(old_garlic)
+        
+        # Create the aura particle
         self.particles.append(
             Particle(
                 WEAPON,
@@ -1418,16 +1728,28 @@ class Game(BaseGame):
                 player.y,
                 attributes={
                     "damage": damage,
-                    "speed": 0,
+                    "speed": 0,  # Aura doesn't move independently
                     "angle": 0,
                     "id": self.next_id,
                     "weapon_name": weapon_name,
                     "level": level,
-                    "aura_radius": 60 + 10 * (level-1),
-                    "duration": 60
+                    "base_size": base_size,  # Store base size
+                    "area_multiplier": area_multiplier,  # Store area multiplier
+                    "aura_radius": aura_radius,  # Use the scaled radius
+                    "pool_limit": pool_limit,
+                    "hit_cooldown": {},  # Dictionary to track per-enemy hit cooldowns
+                    "duration": weapon_type["cooldown"],  # Duration until next damage tick
+                    "knockback": weapon_type["knockback"],
+                    "affected_enemies": set(),  # Track currently affected enemies
+                    "target_player_id": player.attributes["id"],  # Link to player
+                    "shape": weapon_type["shape"],
+                    "is_aura": True,  # Flag to identify as an aura effect
+                    "cooldown": weapon_type["cooldown"],  # Store original cooldown value
+                    "breath_timer": 0  # 添加呼吸效果计时器
                 }
             )
         )
+        print(f"[DEBUG] Created new Garlic aura with radius {aura_radius} at level {level}")
         self.next_id += 1
 
     def spawn_whip(self, player, weapon_name, level):
@@ -1580,10 +1902,32 @@ class Game(BaseGame):
                     progress = 1 - (particle.attributes["timer"] / DAMAGE_TEXT_DURATION)
                     particle.y -= DAMAGE_TEXT_RISE / DAMAGE_TEXT_DURATION
                     
-                    # Make it fade out by adjusting alpha in the color attribute
-                    alpha = int(255 * (1 - progress))
+                    # Make it fade out by adjusting alpha
+                    # 在最后0.3秒开始淡出
+                    fade_start = 0.7  # 0.7秒后开始淡出
+                    if progress > fade_start:
+                        fade_progress = (progress - fade_start) / (1 - fade_start)
+                        alpha = int(255 * (1 - fade_progress))
+                    else:
+                        alpha = 255
                     particle.attributes["alpha"] = alpha
-        
+
+                    # 处理尺寸动画
+                    if particle.attributes["scale_phase"] == "grow":
+                        # 在前0.2秒内从50%变到100%
+                        grow_duration = DAMAGE_TEXT_DURATION / 5  # 0.2秒
+                        grow_progress = min(1.0, (DAMAGE_TEXT_DURATION - particle.attributes["timer"]) / grow_duration)
+                        particle.attributes["scale"] = 0.5 + (0.5 * grow_progress)
+                        if grow_progress >= 1.0:
+                            particle.attributes["scale_phase"] = "shrink"
+                    else:  # shrink phase
+                        # 在0.2秒后的0.5秒内从100%变回50%
+                        shrink_start = DAMAGE_TEXT_DURATION / 5  # 0.2秒
+                        shrink_duration = DAMAGE_TEXT_DURATION / 1  # 0.5秒
+                        shrink_progress = ((DAMAGE_TEXT_DURATION - particle.attributes["timer"]) - shrink_start) / shrink_duration
+                        shrink_progress = min(1.0, max(0.0, shrink_progress))
+                        particle.attributes["scale"] = 1.0 - (0.5 * shrink_progress)
+
         # Remove expired damage texts
         for text in damage_texts_to_remove:
             self.remove_particle(text)
@@ -1662,13 +2006,27 @@ class Game(BaseGame):
                         self.spawn_homing_missile(player, name, level)
                         player.attributes[cooldown_key] = w["cooldown"]
                     elif name == "KingBible":
-                        # 获取当前等级的属性
-                        lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
-                        props = KING_BIBLE_LEVELS[lvl]
-                        amount = max(1, props["amount"])
-                        for i in range(amount):
-                            self.spawn_orbiting_book(player, name, level, i, amount)
-                        player.attributes[cooldown_key] = w["cooldown"]
+                        # 获取武器类型配置
+                        weapon_type = next((w for w in WEAPON_TYPES if w["name"] == name), None)
+                        if not weapon_type:
+                            continue
+                            
+                        # 检查是否已经有圣经在场上
+                        existing_bibles = [w for w in self.get_particles(WEAPON) 
+                                         if w.attributes.get("weapon_name") == "KingBible" and 
+                                         w.attributes.get("target_player_id") == player.attributes["id"]]
+                        
+                        # 如果没有圣经在场上，且冷却时间结束，则生成新的
+                        if not existing_bibles and current_cooldown <= 0:
+                            print(f"生成新的圣经，当前冷却: {current_cooldown}")
+                            # 获取当前等级的属性
+                            lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
+                            props = KING_BIBLE_LEVELS[lvl]
+                            amount = max(1, props["amount"])
+                            for i in range(amount):
+                                self.spawn_orbiting_book(player, name, level, i, amount)
+                            # 不在这里设置冷却时间，而是在粒子消失时设置
+                            print("圣经粒子生成完成")
                     elif name == "FireWand":
                         # 获取当前等级的属性
                         amount = 1 + sum(u.get("count", 0) for u in w["upgrade_table"][:max(0,level-1)])
@@ -1676,11 +2034,73 @@ class Game(BaseGame):
                             self.spawn_fan_shot(player, name, level, i, amount)
                         player.attributes[cooldown_key] = w["cooldown"]
                     elif name == "Cross":
-                        self.spawn_boomerang(player, name, level)
-                        player.attributes[cooldown_key] = w["cooldown"]
+                        # 获取当前等级的属性
+                        amount = 1
+                        if level >= 4:
+                            amount = 2
+                        if level >= 7:
+                            amount = 3
+                            
+                        # 发射序列状态
+                        if "cross_shot_seq" not in player.attributes:
+                            player.attributes["cross_shot_seq"] = None
+                        seq = player.attributes["cross_shot_seq"]
+                        
+                        if current_cooldown <= 0 and seq is None:
+                            # 冷却到0，初始化发射序列
+                            player.attributes["cross_shot_seq"] = {
+                                "amount": amount,
+                                "interval": 6,  # 0.1秒间隔（6帧）
+                                "next_shot": 0,
+                                "shots_left": amount,
+                                "base_angle": None  # 记录本轮齐射基准角度
+                            }
+                            player.attributes[cooldown_key] = w["cooldown"]  # 设置总冷却时间
+                            continue
+                            
+                        # 处理发射序列
+                        if seq is not None:
+                            if seq["shots_left"] > 0:
+                                if seq["next_shot"] <= 0:
+                                    # 寻找最近的敌人，计算发射角度
+                                    nearest_enemy = None
+                                    min_dist = float('inf')
+                                    for enemy_type in [ENEMY, ENEMY_ELITE]:
+                                        for enemy in self.get_particles(enemy_type):
+                                            dx = enemy.x - player.x
+                                            dy = enemy.y - player.y
+                                            dist = math.sqrt(dx * dx + dy * dy)
+                                            if dist < min_dist:
+                                                min_dist = dist
+                                                nearest_enemy = enemy
+                                    
+                                    # 计算发射角度
+                                    if nearest_enemy:
+                                        angle = math.degrees(math.atan2(nearest_enemy.y - player.y, nearest_enemy.x - player.x))
+                                    else:
+                                        angle = random.uniform(0, 360)  # 如果没有敌人，随机方向
+                                        
+                                    # 发射单个十字架
+                                    self.spawn_boomerang(player, name, level, angle)
+                                    seq["shots_left"] -= 1
+                                    seq["next_shot"] = seq["interval"]
+                                else:
+                                    seq["next_shot"] -= 1
+                            if seq["shots_left"] <= 0:
+                                player.attributes["cross_shot_seq"] = None
+                            continue
+                        # 冷却递减
+                        if current_cooldown > 0:
+                            player.attributes[cooldown_key] -= 1
+                        continue
                     elif name == "Garlic":
-                        self.spawn_aura(player, name, level)
-                        player.attributes[cooldown_key] = w["cooldown"]
+                        # Check if we need to create or recreate the Garlic aura
+                        existing_garlic = next((w for w in self.get_particles(WEAPON) 
+                                              if w.attributes.get("weapon_name") == "Garlic" and 
+                                              w.attributes.get("target_player_id") == player.attributes["id"]), None)
+                        if not existing_garlic:
+                            self.spawn_aura(player, name, level)
+                            player.attributes[cooldown_key] = w["cooldown"]
                     elif name == "Whip":
                         self.spawn_whip(player, name, level)
                         player.attributes[cooldown_key] = w["cooldown"]
@@ -1699,7 +2119,66 @@ class Game(BaseGame):
         weapons_to_remove = []
         for weapon in self.get_particles(WEAPON):
             wname = weapon.attributes.get("weapon_name", "")
-            # Knife粒子只做直线运动，彻底避免被其他逻辑影响
+            
+            # Handle Garlic aura damage
+            if wname == "Garlic" and weapon.attributes.get("is_aura"):
+                # Update weapon position to follow player
+                target_player = next((p for p in self.get_particles(PLAYER) if p.attributes["id"] == weapon.attributes["target_player_id"]), None)
+                if target_player:
+                    weapon.x = target_player.x
+                    weapon.y = target_player.y
+                
+                # Process duration and cooldown
+                weapon.attributes["duration"] -= 1
+                if weapon.attributes["duration"] <= 0:
+                    # Reset duration using stored cooldown
+                    weapon.attributes["duration"] = weapon.attributes.get("cooldown", 78)  # Default to 78 if not stored
+                    # Clear hit cooldowns when the aura refreshes
+                    weapon.attributes["hit_cooldown"] = {}
+                    
+                    # Check for enemies in range
+                    radius = weapon.attributes.get("aura_radius")  # Use the radius we calculated in spawn_aura
+                    print(f"[DEBUG] Garlic aura damage tick - Radius: {radius}, Level: {weapon.attributes.get('level')}")
+                    
+                    for enemy_type in [ENEMY, ENEMY_ELITE]:
+                        for enemy in self.get_particles(enemy_type):
+                            if enemy.attributes.get("is_dying"):
+                                continue
+                            
+                            # Calculate distance to enemy
+                            dx = enemy.x - weapon.x
+                            dy = enemy.y - weapon.y
+                            dist = math.sqrt(dx * dx + dy * dy)
+                            
+                            # If enemy is in range
+                            if dist <= radius:
+                                enemy_id = enemy.attributes.get("id", -1)
+                                hit_cooldown = weapon.attributes.get("hit_cooldown", {})
+                                
+                                # Check if we can damage this enemy
+                                if enemy_id not in hit_cooldown or hit_cooldown[enemy_id] <= 0:
+                                    # Apply damage and knockback
+                                    damage = weapon.attributes.get("damage", 5)
+                                    self.apply_damage(weapon, enemy, damage)
+                        
+                                    # Apply knockback
+                                    knockback = weapon.attributes.get("knockback", 0.5)
+                                    if knockback > 0 and dist > 0:
+                                        # Calculate knockback direction (away from aura center)
+                                        kdx = dx / dist
+                                        kdy = dy / dist
+                                        enemy.attributes["knockback_dx"] = kdx
+                                        enemy.attributes["knockback_dy"] = kdy
+                                        enemy.attributes["knockback_timer"] = 5  # 5 frames of knockback
+                                    
+                                    # Set cooldown for this enemy (1.3s = 78 frames at 60fps)
+                                    hit_cooldown[enemy_id] = 78
+                                
+                                # Update the hit cooldown dictionary
+                                weapon.attributes["hit_cooldown"] = hit_cooldown
+                continue
+            
+            # Handle other weapons
             if wname == "Knife" and "vx" in weapon.attributes and "vy" in weapon.attributes:
                 # 保护武器颜色
                 self.protect_weapon_colors(weapon)
@@ -1848,14 +2327,28 @@ class Game(BaseGame):
                         # 保护武器颜色
                         self.protect_weapon_colors(weapon)
                         
+                        # 十字架特殊处理：击中敌人后开始返回
+                        if weapon.attributes.get("weapon_name") == "Cross" and not weapon.attributes.get("has_hit"):
+                            weapon.attributes["has_hit"] = True
+                            weapon.attributes["is_returning"] = True
+                            # 计算返回方向（与当前方向相反）
+                            current_angle = weapon.attributes.get("angle", 0)
+                            return_angle = (current_angle + 180) % 360
+                            rad = math.radians(return_angle)
+                            return_speed = weapon.attributes.get("original_speed", 8) * weapon.attributes.get("return_speed_multiplier", 1.5)
+                            weapon.attributes["vx"] = math.cos(rad) * return_speed
+                            weapon.attributes["vy"] = math.sin(rad) * return_speed
+                            weapon.attributes["angle"] = return_angle
+                            print(f"十字架 ID:{weapon.attributes.get('id')} 击中敌人，开始返回")
+                        
                         # Apply damage to enemy using health system
                         weapon_damage = weapon.attributes["damage"]
                         
                         # Store old HP value for damage calculation
                         old_hp = enemy.health_system.current_hp if enemy.health_system else 0
                         
-                        # Start enemy blinking effect
-                        enemy.attributes["blink_timer"] = PLAYER_BLINK_DURATION  # Use same duration as player
+                        # 将闪烁效果改为变白效果
+                        enemy.attributes["white_effect_timer"] = 6  # 0.1秒 = 6帧
                         
                         # Apply damage using health system
                         is_alive = self.apply_damage(weapon, enemy, weapon_damage)
@@ -2015,6 +2508,72 @@ class Game(BaseGame):
                     weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
+            # 十字架的移动逻辑
+            if wname == "Cross":
+                # 获取当前状态
+                has_hit = weapon.attributes.get("has_hit", False)
+                
+                # 获取当前速度和加速度
+                vx = weapon.attributes.get("vx", 0)
+                vy = weapon.attributes.get("vy", 0)
+                
+                # 获取初始速度和方向
+                initial_vx = weapon.attributes.get("initial_vx", 0)
+                initial_vy = weapon.attributes.get("initial_vy", 0)
+                initial_speed = math.sqrt(initial_vx * initial_vx + initial_vy * initial_vy)
+                
+                # 更新自转角度（使用配置的旋转速度）
+                self_rotation = weapon.attributes.get("self_rotation", 0)
+                rotation_speed = weapon.attributes.get("rotation_speed", 24)  # 使用配置的旋转速度，默认24
+                self_rotation = (self_rotation + rotation_speed) % 360
+                weapon.attributes["self_rotation"] = self_rotation
+                
+                if initial_speed > 0:
+                    # 计算当前速度
+                    current_speed = math.sqrt(vx * vx + vy * vy)
+                    
+                    # 计算加速度（始终与初始方向相反）
+                    deceleration = 0.2  # 加速度大小
+                    ax = -(initial_vx / initial_speed) * deceleration
+                    ay = -(initial_vy / initial_speed) * deceleration
+                    
+                    # 应用加速度
+                    vx += ax
+                    vy += ay
+                    
+                    # 检查速度方向是否已经改变（点积小于0表示方向已改变）
+                    direction_changed = (vx * initial_vx + vy * initial_vy) < 0
+                    
+                    if direction_changed:
+                        # 如果方向已改变，增加返回加速度
+                        return_acceleration = 0.3  # 返回时的加速度大小
+                        vx += -initial_vx / initial_speed * return_acceleration
+                        vy += -initial_vy / initial_speed * return_acceleration
+                    
+                    # 限制最大返回速度
+                    max_return_speed = initial_speed * 1.5
+                    current_speed = math.sqrt(vx * vx + vy * vy)
+                    if current_speed > max_return_speed:
+                        speed_scale = max_return_speed / current_speed
+                        vx *= speed_scale
+                        vy *= speed_scale
+                
+                # 更新位置和速度
+                weapon.x += vx
+                weapon.y += vy
+                weapon.attributes["vx"] = vx
+                weapon.attributes["vy"] = vy
+                
+                # 更新角度（基于当前速度方向）
+                if math.sqrt(vx * vx + vy * vy) > 0:
+                    weapon.attributes["angle"] = math.degrees(math.atan2(vy, vx))
+                
+                # 检查是否超出屏幕
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                    weapons_to_remove.append(weapon)
+                continue
+                
             # 圣经的旋转移动
             if wname == "KingBible":
                 # 获取目标玩家
@@ -2030,13 +2589,28 @@ class Game(BaseGame):
                     speed = weapon.attributes.get("speed", 1.0)
                     
                     # 更新角度
-                    orbit_angle = (orbit_angle + speed * 3) % 360  # 3是旋转速度系数
+                    orbit_angle = (orbit_angle + speed * 6) % 360  # 增加旋转速度系数到6
                     weapon.attributes["orbit_angle"] = orbit_angle
                     
                     # 计算新位置
                     rad = math.radians(orbit_angle)
-                    weapon.x = target_player.x + orbit_radius * math.cos(rad)
-                    weapon.y = target_player.y + orbit_radius * math.sin(rad)
+                    # 获取当前持续时间进度
+                    duration = weapon.attributes.get("duration", 0)
+                    total_duration = weapon.attributes.get("total_duration", 240)  # 4秒 = 240帧
+                    fade_duration = 30  # 淡出动画持续30帧 (0.5秒)
+                    
+                    if duration <= fade_duration:
+                        # 在最后0.5秒进行淡出动画
+                        fade_progress = duration / fade_duration
+                        # 逐渐减小半径，使圣经向玩家靠拢
+                        current_radius = orbit_radius * fade_progress
+                        # 同时缩小尺寸
+                        weapon.attributes["current_size"] = weapon.attributes.get("original_size", 14) * fade_progress
+                    else:
+                        current_radius = orbit_radius
+                    
+                    weapon.x = target_player.x + current_radius * math.cos(rad)
+                    weapon.y = target_player.y + current_radius * math.sin(rad)
                     
                     # 更新武器角度（用于渲染）
                     weapon.attributes["angle"] = orbit_angle
@@ -2045,7 +2619,18 @@ class Game(BaseGame):
                     if "duration" in weapon.attributes:
                         weapon.attributes["duration"] -= 1
                         if weapon.attributes["duration"] <= 0:
-                            weapons_to_remove.append(weapon)
+                            if weapon not in weapons_to_remove:  # 避免重复添加
+                                weapons_to_remove.append(weapon)
+                                # 如果是圣经粒子，在消失时设置冷却时间
+                                if weapon.attributes.get("weapon_name") == "KingBible":
+                                    # 找到对应的玩家
+                                    for player in self.get_particles(PLAYER):
+                                        if player.attributes.get("id") == weapon.attributes.get("target_player_id"):
+                                            # 设置3秒冷却（180帧）
+                                            player.attributes["KingBible_cooldown"] = 180
+                                            print(f"圣经粒子 {weapon.attributes.get('id')} 消失，设置3秒冷却时间")
+                                            break
+                            continue  # 跳过后续处理
                 else:
                     weapons_to_remove.append(weapon)
                 continue
@@ -2217,8 +2802,8 @@ class Game(BaseGame):
                         # Store old HP value for damage calculation
                         old_hp = enemy.health_system.current_hp if enemy.health_system else 0
                         
-                        # Start enemy blinking effect
-                        enemy.attributes["blink_timer"] = PLAYER_BLINK_DURATION  # Use same duration as player
+                        # 将闪烁效果改为变白效果
+                        enemy.attributes["white_effect_timer"] = 6  # 0.1秒 = 6帧
                         
                         # Apply damage using health system
                         is_alive = self.apply_damage(weapon, enemy, weapon_damage)
@@ -2396,6 +2981,73 @@ class Game(BaseGame):
             if blood in self.particles:
                 self.remove_particle(blood)
 
+        # Handle aura weapons (Garlic)
+        for weapon in self.get_particles(WEAPON):
+            if weapon.attributes.get("is_aura"):
+                # Update aura position to follow player
+                for player in self.get_particles(PLAYER):
+                    if player.attributes["id"] == weapon.attributes["target_player_id"]:
+                        weapon.x = player.x
+                        weapon.y = player.y
+                        break
+                
+                # Process duration
+                weapon.attributes["duration"] -= 1
+                if weapon.attributes["duration"] <= 0:
+                    # Reset duration for next tick
+                    weapon_type = next((w for w in WEAPON_TYPES if w["name"] == weapon.attributes["weapon_name"]), None)
+                    if weapon_type:
+                        weapon.attributes["duration"] = weapon_type["cooldown"]
+                    
+                    # Check for enemies in range
+                    radius = weapon.attributes.get("aura_radius")  # Use the radius we calculated in spawn_aura
+                    if radius is None:  # Fallback only if radius is not set
+                        radius = WEAPON_SIZE * 2
+                    
+                    for enemy_type in [ENEMY, ENEMY_ELITE]:
+                        for enemy in self.get_particles(enemy_type):
+                            if enemy.attributes.get("is_dying"):
+                                continue
+                            
+                            # Calculate distance to enemy
+                            dx = enemy.x - weapon.x
+                            dy = enemy.y - weapon.y
+                            dist = math.sqrt(dx * dx + dy * dy)
+                            
+                            # If enemy is in range
+                            if dist <= radius:
+                                enemy_id = enemy.attributes.get("id", -1)
+                                hit_cooldown = weapon.attributes.get("hit_cooldown", {})
+                                
+                                # Update cooldown for this enemy
+                                if enemy_id in hit_cooldown:
+                                    hit_cooldown[enemy_id] = max(0, hit_cooldown[enemy_id] - 1)
+                                
+                                # Check if we can damage this enemy
+                                if enemy_id not in hit_cooldown or hit_cooldown[enemy_id] <= 0:
+                                    # Apply damage and knockback
+                                    damage = weapon.attributes.get("damage", 5)
+                                    self.apply_damage(weapon, enemy, damage)
+                                    
+                                    # Apply knockback
+                                    knockback = weapon.attributes.get("knockback", 0.5)
+                                    if knockback > 0 and dist > 0:
+                                        # Calculate knockback direction (away from aura center)
+                                        kdx = dx / dist
+                                        kdy = dy / dist
+                                        enemy.attributes["knockback_dx"] = kdx
+                                        enemy.attributes["knockback_dy"] = kdy
+                                        enemy.attributes["knockback_timer"] = 5  # 5 frames of knockback
+                                    
+                                    # Set cooldown for this enemy (1.3s = 78 frames at 60fps)
+                                    hit_cooldown[enemy_id] = 78
+                                
+                                # Update the hit cooldown dictionary
+                                weapon.attributes["hit_cooldown"] = hit_cooldown
+                continue
+            
+            # Handle other weapon types...
+
     def agent_action(self, last_action=None):
         """
         AI agent that tries to avoid enemies and collect XP
@@ -2497,36 +3149,41 @@ class Game(BaseGame):
     def draw_start_menu(self, frame):
         """Draw the start menu screen"""
         # Background
-        frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#000000"))
+        frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
         
         # Title
-        frame.add_text(Text(SCREEN_WIDTH // 2 - 150, SCREEN_HEIGHT // 2 - 100, "Vampire Survivor", "#FFFFFF", 40))
+        title_x = SPATIAL_RESOLUTION // 2 - 150
+        title_y = SPATIAL_RESOLUTION // 2 - 100
+        frame.add_text(Text(title_x, title_y, "Vampire Survivor", "#FFFFFF", 40))
         
         # Start button
+        button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
+        button_y = SPATIAL_RESOLUTION // 2 - 30  # Match the click detection position
+        
+        # Button hover effect
         button_background = BUTTON_HOVER_COLOR if self.is_point_in_rect(
             self.mouse_pos[0], self.mouse_pos[1],
-            SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-            SCREEN_HEIGHT // 2 + 50,
+            button_x, button_y,
             BUTTON_WIDTH, BUTTON_HEIGHT
         ) else BUTTON_COLOR
         
+        # Draw button
         frame.add_rectangle(Rectangle(
-            SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-            SCREEN_HEIGHT // 2 + 50,
+            button_x, button_y,
             BUTTON_WIDTH, BUTTON_HEIGHT,
             button_background
         ))
         
-        frame.add_text(Text(
-            SCREEN_WIDTH // 2 - 30,
-            SCREEN_HEIGHT // 2 + 80,
-            "Start",
-            BUTTON_TEXT_COLOR,
-            20
-        ))
+        # Button text
+        text_x = button_x + BUTTON_WIDTH // 2 - 30
+        text_y = button_y + BUTTON_HEIGHT // 2 + 5
+        frame.add_text(Text(text_x, text_y, "Start", BUTTON_TEXT_COLOR, 20))
         
         # Instructions
-        frame.add_text(Text(SCREEN_WIDTH // 2 - 140, SCREEN_HEIGHT // 2 + 150, "WASD to move, survive as long as possible!", "#CCCCCC", 16))
+        instruction_x = SPATIAL_RESOLUTION // 2 - 140
+        instruction_y = SPATIAL_RESOLUTION // 2 + 50
+        frame.add_text(Text(instruction_x, instruction_y, 
+            "WASD to move, survive as long as possible!", "#CCCCCC", 16))
 
     def draw_upgrade_menu(self, frame):
         """Draw the upgrade menu screen，严格层级：背景-按钮-文本-烟花"""
@@ -2547,18 +3204,41 @@ class Game(BaseGame):
             btn_y = sy(button_y)
             btn_w = max(60, int(BUTTON_WIDTH * scale))
             btn_h = max(20, int(BUTTON_HEIGHT * scale))
+            
+            # Determine button color based on selection and hover
+            is_selected = i == self.selected_upgrade_index
+            is_hovered = self.is_point_in_rect(
+                self.mouse_pos[0], self.mouse_pos[1],
+                btn_x, btn_y, btn_w, btn_h
+            )
+            button_color = "#4444AA" if is_selected else "#333366"
+            if is_hovered:
+                button_color = "#5555BB"
+            
             frame.add_rectangle(Rectangle(
                 btn_x,
                 btn_y,
                 btn_w,
                 btn_h,
-                BUTTON_COLOR
+                button_color
             ))
+            
+            # Add selection indicator
+            if is_selected:
+                frame.add_text(Text(
+                    btn_x - 20,
+                    btn_y + btn_h // 2,
+                    ">",
+                    "#FFFFFF",
+                    max(10, int(24 * scale))
+                ))
+        
         # 4. 文本（按钮之上）
         levelup_text = "Level Up!"
         font_size = max(10, int(40 * scale))
         text_width = len(levelup_text) * font_size * 0.5
         frame.add_text(Text(sx(cx - text_width // 2), sy(cy - 150), levelup_text, "#FFFFFF", font_size))
+        
         for i, upgrade in enumerate(self.upgrade_options):
             button_y = cy - 50 + i * (BUTTON_HEIGHT + 20)
             btn_x = sx(cx - BUTTON_WIDTH // 2)
@@ -2630,24 +3310,24 @@ class Game(BaseGame):
         ))
 
     def spawn_damage_text(self, x, y, damage_amount):
-        """Spawn a damage text particle at the given position"""
         # Format damage as int
         if int(damage_amount) <= 0:
             return  # 伤害为0不显示跳字
         damage_text = str(int(damage_amount))
-        # Create damage text particle
+        """生成伤害数字文本"""
         self.particles.append(
             Particle(
                 DAMAGE_TEXT,
                 x,
                 y,
                 attributes={
-                    "id": self.next_id,
                     "text": damage_text,
                     "timer": DAMAGE_TEXT_DURATION,
-                    "color": "#FFFFFF",  # 白色
-                    "size": 24,  # 字号加倍（原来是16）
-                    "alpha": 255
+                    "id": self.next_id,
+                    "alpha": 255,  # 初始透明度
+                    "scale": 0.5,  # 初始尺寸为50%
+                    "scale_phase": "grow",  # 尺寸变化阶段：grow（变大）或shrink（变小）
+                    "color": "#FFFFFF"  # 固定为白色
                 }
             )
         )
@@ -2778,3 +3458,30 @@ class Game(BaseGame):
                 )
             )
             self.next_id += 1
+
+    def toggle_debug_toolbar(self):
+        """Toggle the debug toolbar visibility"""
+        self.show_debug_toolbar = not self.show_debug_toolbar
+        print(f"[DEBUG] Debug toolbar toggled to: {self.show_debug_toolbar}")
+        print(f"[DEBUG] Game state: {self.game_state}")
+        
+        # Print player info if available
+        player = self.get_particle(PLAYER)
+        if player:
+            print(f"[DEBUG] Player weapons: {player.attributes.get('weapons', {})}")
+
+    def get_garlic_border_color(self, weapon):
+        """获取大蒜武器边框的颜色，带呼吸效果"""
+        # 更新呼吸计时器
+        breath_timer = weapon.attributes.get("breath_timer", 0)
+        weapon.attributes["breath_timer"] = (breath_timer + 1) % 60  # 60帧一个周期
+        
+        # 使用正弦函数生成0-1之间的值
+        breath_progress = math.sin(breath_timer * math.pi / 30)  # 30是60的一半，让正弦波在0-1之间
+        breath_progress = (breath_progress + 1) / 2  # 将-1到1映射到0到1
+        
+        # 将进度值映射到30%-60%的透明度范围
+        alpha = int(30 + breath_progress * 50)  # 30%-60%的范围
+        
+        # 返回带有动态透明度的红色
+        return f"#FF0000{alpha:02x}"  # 使用十六进制格式的透明度

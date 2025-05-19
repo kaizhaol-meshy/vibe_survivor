@@ -50,7 +50,7 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
             new_action = game_state.get_user_inputs(keys)
             # Get mouse information and pass it to the game
             mouse_pos, mouse_clicked = server.get_mouse_info()
-            game_state.handle_input(new_action, mouse_pos, mouse_clicked)
+            game_state.handle_input(keys, mouse_pos, mouse_clicked)
 
         # 每100帧输出一次粒子信息
         if frame_count % 100 == 0:

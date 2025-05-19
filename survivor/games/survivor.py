@@ -352,7 +352,6 @@ class Game(BaseGame):
         self.particles = []
         self.next_id = 0
         self.game_state = STATE_START_MENU
-        self.player_blink_timer = 0
         self.show_debug_toolbar = True  # Initialize debug toolbar visibility flag
         self.last_move_dir = [0, 0]  # Store last movement direction for weapon aiming
         self.available_upgrades = []
@@ -570,8 +569,6 @@ class Game(BaseGame):
         
         # 7. Draw player (top layer)
         for player in self.get_particles(PLAYER):
-            if self.player_blink_timer > 0 and self.player_blink_timer % 4 >= 2:
-                continue
             if player.attributes.get("damage_effect_timer", 0) > 0:
                 frame.add_circle(Circle(player.x, player.y, PLAYER_SIZE, "#FF0000"))
             else:
@@ -661,7 +658,6 @@ class Game(BaseGame):
             return
             
         weapons = player.attributes.get("weapons", {})
-        print(f"[DEBUG] Drawing toolbar with weapons: {weapons}")
         
         # Draw weapon level controls
         for i, weapon_type in enumerate(WEAPON_TYPES):
@@ -715,7 +711,6 @@ class Game(BaseGame):
             self.hp_displayed = 100
             self.hp_transition_timer = 0
             self.hp_blink_timer = 0
-            self.player_blink_timer = 0
             self.hp_section = 5
             
             # Reset wave system
@@ -775,7 +770,6 @@ class Game(BaseGame):
         self.elite_spawned = False
         self.particles = []
         self.next_id = 0
-        self.player_blink_timer = 0
         self.last_move_dir = [0, 0]
         self.available_upgrades = []
         self.selected_upgrade_index = 0
@@ -983,6 +977,9 @@ class Game(BaseGame):
                     size1 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
                 elif weapon_name == "Cross":
                     size1 = weapon_type["size"] * 2.0  # 十字架使用2倍尺寸，与显示大小匹配
+                elif weapon_name == "Garlic" and particle1.attributes.get("is_aura"):
+                    # 对于大蒜光环，使用其实际的aura_radius
+                    size1 = particle1.attributes.get("aura_radius", weapon_type["size"] * 2)
                 else:
                     size1 = weapon_type["size"]
 
@@ -998,14 +995,11 @@ class Game(BaseGame):
                     size2 = weapon_type["size"] * 1.2  # 斧子使用1.2倍尺寸，与显示大小匹配
                 elif weapon_name == "Cross":
                     size2 = weapon_type["size"] * 2.0  # 十字架使用2倍尺寸，与显示大小匹配
+                elif weapon_name == "Garlic" and particle2.attributes.get("is_aura"):
+                    # 对于大蒜光环，使用其实际的aura_radius
+                    size2 = particle2.attributes.get("aura_radius", weapon_type["size"] * 2)
                 else:
                     size2 = weapon_type["size"]
-
-        # 对于光环类武器(Garlic)，使用属性中指定的范围
-        if particle1.kind == WEAPON and particle1.attributes.get("weapon_name") == "Garlic":
-            size1 = particle1.attributes.get("aura_radius", size1)
-        if particle2.kind == WEAPON and particle2.attributes.get("weapon_name") == "Garlic":
-            size2 = particle2.attributes.get("aura_radius", size2)
             
         # 基本圆形碰撞检测
         dx = particle1.x - particle2.x
@@ -1165,7 +1159,6 @@ class Game(BaseGame):
         self.hp_displayed = 100
         self.hp_transition_timer = 0
         self.hp_blink_timer = 0
-        self.player_blink_timer = 0
         self.hp_section = 5
         
         # Reset wave system
@@ -1843,7 +1836,6 @@ class Game(BaseGame):
             if dx != 0 or dy != 0:
                 norm = math.sqrt(dx*dx + dy*dy)
                 self.last_move_dir = (dx/norm, dy/norm)
-            print("[DEBUG] 玩家移动dx,dy:", dx, dy, "last_move_dir:", self.last_move_dir)
 
         # Update animation timers
         if self.hp_transition_timer > 0:
@@ -1857,8 +1849,6 @@ class Game(BaseGame):
         if self.hp_blink_timer > 0:
             self.hp_blink_timer -= 1
             
-        if self.player_blink_timer > 0:
-            self.player_blink_timer -= 1
             
         # Update player invincible timer
         if player.attributes.get("is_invincible", False):
@@ -2302,17 +2292,29 @@ class Game(BaseGame):
                         damage = enemy.attributes.get("damage", 1)
                         if enemy.kind == ENEMY_ELITE:
                             damage *= 2  # Elite enemies deal double damage
+                        
+                        # 检查玩家是否有大蒜武器，如果有，不应该阻止碰撞，但应该减少伤害
+                        has_garlic = False
+                        garlic_level = 0
+                        if "weapons" in player.attributes:
+                            weapons = player.attributes["weapons"]
+                            if "Garlic" in weapons:
+                                has_garlic = True
+                                garlic_level = weapons["Garlic"]
+                                # 大蒜等级越高，伤害减免越多
+                                damage_reduction = min(0.9, 0.3 + (garlic_level - 1) * 0.1)  # 最多减免90%伤害
+                                damage = max(1, int(damage * (1 - damage_reduction)))  # 至少造成1点伤害
+                        
                         is_alive = self.apply_damage(enemy, player, damage)
                         if not is_alive:
                             self.game_state = STATE_GAME_OVER
                             return
+                            
                         # 添加流血效果
                         self.spawn_blood_effect(player.x, player.y)
                         # Make player invincible briefly
                         player.attributes["is_invincible"] = True
                         player.attributes["invincible_timer"] = 10  # 1 second at 60fps
-                        # Start player blinking effect
-                        self.player_blink_timer = PLAYER_BLINK_DURATION
                         # Set player damage effect
                         player.attributes["damage_effect_timer"] = 10  # 2 frames of red flash
                         # Move enemy away slightly to prevent continuous damage
@@ -2324,8 +2326,6 @@ class Game(BaseGame):
                     # 根据敌人类型确定碰撞尺寸
                     enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
                     if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
-                        # 保护武器颜色
-                        self.protect_weapon_colors(weapon)
                         
                         # 十字架特殊处理：击中敌人后开始返回
                         if weapon.attributes.get("weapon_name") == "Cross" and not weapon.attributes.get("has_hit"):
@@ -2339,7 +2339,6 @@ class Game(BaseGame):
                             weapon.attributes["vx"] = math.cos(rad) * return_speed
                             weapon.attributes["vy"] = math.sin(rad) * return_speed
                             weapon.attributes["angle"] = return_angle
-                            print(f"十字架 ID:{weapon.attributes.get('id')} 击中敌人，开始返回")
                         
                         # Apply damage to enemy using health system
                         weapon_damage = weapon.attributes["damage"]
@@ -2395,10 +2394,7 @@ class Game(BaseGame):
                             enemy.attributes["death_anim_timer"] = 30
                             enemy.attributes["death_anim_size"] = enemy_size
                             enemy.attributes["death_anim_white"] = False
-                        else:
-                            # 如果敌人还活着，确保飞刀颜色不变
-                            if weapon.attributes.get("weapon_name") == "Knife":
-                                self.protect_weapon_colors(weapon)
+
 
         # Note: Debug toolbar should only be drawn in draw_debug_toolbar method, not in step
 
@@ -2628,7 +2624,6 @@ class Game(BaseGame):
                                         if player.attributes.get("id") == weapon.attributes.get("target_player_id"):
                                             # 设置3秒冷却（180帧）
                                             player.attributes["KingBible_cooldown"] = 180
-                                            print(f"圣经粒子 {weapon.attributes.get('id')} 消失，设置3秒冷却时间")
                                             break
                             continue  # 跳过后续处理
                 else:
@@ -2771,17 +2766,29 @@ class Game(BaseGame):
                         damage = enemy.attributes.get("damage", 1)
                         if enemy.kind == ENEMY_ELITE:
                             damage *= 2  # Elite enemies deal double damage
+                        
+                        # 检查玩家是否有大蒜武器，如果有，不应该阻止碰撞，但应该减少伤害
+                        has_garlic = False
+                        garlic_level = 0
+                        if "weapons" in player.attributes:
+                            weapons = player.attributes["weapons"]
+                            if "Garlic" in weapons:
+                                has_garlic = True
+                                garlic_level = weapons["Garlic"]
+                                # 大蒜等级越高，伤害减免越多
+                                damage_reduction = min(0.9, 0.3 + (garlic_level - 1) * 0.1)  # 最多减免90%伤害
+                                damage = max(1, int(damage * (1 - damage_reduction)))  # 至少造成1点伤害
+                        
                         is_alive = self.apply_damage(enemy, player, damage)
                         if not is_alive:
                             self.game_state = STATE_GAME_OVER
                             return
+                            
                         # 添加流血效果
                         self.spawn_blood_effect(player.x, player.y)
                         # Make player invincible briefly
                         player.attributes["is_invincible"] = True
                         player.attributes["invincible_timer"] = 10  # 1 second at 60fps
-                        # Start player blinking effect
-                        self.player_blink_timer = PLAYER_BLINK_DURATION
                         # Set player damage effect
                         player.attributes["damage_effect_timer"] = 10  # 2 frames of red flash
                         # Move enemy away slightly to prevent continuous damage
@@ -3337,10 +3344,6 @@ class Game(BaseGame):
         """
         应用伤害从攻击者到防御者
         """
-        # 调试信息：检查飞刀颜色
-        if attacker.kind == WEAPON and attacker.attributes.get("weapon_name") == "Knife":
-            print(f"[DEBUG] 伤害前飞刀 ID:{attacker.attributes.get('id')} 颜色:{attacker.attributes.get('main_color')}")
-
         # 圣经冷却处理，未真正造成伤害时直接return True，不显示跳字
         if attacker.attributes.get("weapon_name") == "KingBible":
             cooldowns = attacker.attributes.setdefault("hit_cooldown", {})
@@ -3368,9 +3371,6 @@ class Game(BaseGame):
         else:
             return True
 
-        # 调试信息：再次检查飞刀颜色
-        if attacker.kind == WEAPON and attacker.attributes.get("weapon_name") == "Knife":
-            print(f"[DEBUG] 伤害后飞刀 ID:{attacker.attributes.get('id')} 颜色:{attacker.attributes.get('main_color')}")
 
     def get_kingbible_damage(self, level):
         if level <= 3:

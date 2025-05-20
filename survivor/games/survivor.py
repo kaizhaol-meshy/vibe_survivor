@@ -22,7 +22,7 @@ ENEMY_ELITE = "enemy_elite"  # New type for elite enemies
 WEAPON = "weapon"
 XP = "xp"
 DAMAGE_TEXT = "damage_text"  # New particle type for damage numbers
-BLOOD = "blood"  # 新增：血液粒子类型
+BLOOD = "blood"  # 血液粒子类型
 
 # Game states
 STATE_START_MENU = "start_menu"
@@ -40,16 +40,15 @@ PLAYER_SPEED = 5
 ENEMY_SPEED_MIN = 2
 ENEMY_SPEED_MAX = 3
 ELITE_SPEED_MULTIPLIER = 1.2  # Elite enemies move faster
-ENEMY_SPEED_REDUCTION = 0.5  # 全局敌人速度减速系数
+ENEMY_SPEED_REDUCTION = 0.7  # 全局敌人速度减速系数
 WEAPON_SPEED = 8
-WEAPON_COOLDOWN = 30
 MAX_ENEMIES = 50  # 优化：减少最大敌人数
 MAX_WEAPONS = 4   # 优化：减少最大武器数
 MAX_DAMAGE_TEXTS = 20  # 限制同时存在的伤害数字
-MAX_BLOOD_PARTICLES = 16  # 限制血液粒子数量
-BLOOD_PARTICLE_COUNT = 4  # 每次生成的血液粒子数量
-BLOOD_PARTICLE_SIZE = 2  # 血液粒子大小
-BLOOD_PARTICLE_SPEED = 6  # 血液粒子初始速度
+MAX_BLOOD_PARTICLES = 28  # 限制血液粒子数量
+BLOOD_PARTICLE_COUNT = 8  # 每次生成的血液粒子数量
+BLOOD_PARTICLE_SIZE = 5  # 血液粒子大小
+BLOOD_PARTICLE_SPEED = 8  # 血液粒子初始速度
 BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
 DESPAWN_DISTANCE = 1.5 * SPATIAL_RESOLUTION  # Distance at which enemies despawn
 FRAMES_PER_MINUTE = 60 * 60  # 60fps * 60 seconds
@@ -62,8 +61,6 @@ DAMAGE_TEXT_RISE = 50  # 伤害数字上升距离
 MIN_ENEMIES_PER_WAVE = 30  # 提高最小敌人数
 XP_DROP_CHANCE = 0.5  # 50% chance to drop XP when enemy dies
 ELITE_HEALTH_MULTIPLIER = 5  # Elite enemies have 5x normal health
-BASE_ENEMY_HEALTH = 10  # Base health for normal enemies
-ELITE_ENEMY_HEALTH = BASE_ENEMY_HEALTH * ELITE_HEALTH_MULTIPLIER  # Elite enemy health (50)
 XP_MAGNET_RANGE = 80  # Range at which XP starts moving toward player
 XP_MAGNET_SPEED_MIN = int(2 * 0.7)
 XP_MAGNET_SPEED_MAX = int(15 * 0.7)
@@ -311,7 +308,7 @@ WEAPON_TYPES = [
         "crit_multi": 1.0,
         "block_by_walls": False,
         "rarity": 1,
-        "size": 50,  # Base size for aura
+        "size": 70,  # Base size for aura
         "shape": "circle",
         "behavior": "aura",
         "upgrade_table": [
@@ -510,12 +507,7 @@ class Game(BaseGame):
         # 1. Draw background
         frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
         
-        # 2. Draw blood particles (bottom layer)
-        for blood in self.get_particles(BLOOD):
-            alpha = format(blood.attributes.get("alpha", 255), '02x')
-            color = f"#FF0000{alpha}"  # Red with transparency
-            frame.add_circle(Circle(blood.x, blood.y, blood.attributes.get("size", BLOOD_PARTICLE_SIZE), color))
-        
+      
         # 3. Draw aura effects (except Garlic)
         garlic_weapons = []  # Store Garlic weapons for later rendering
         for weapon in self.get_particles(WEAPON):
@@ -683,6 +675,11 @@ class Game(BaseGame):
                 frame.add_rectangle(Rectangle(bar_x, bar_y, bar_width, bar_height, "#444444"))
                 frame.add_rectangle(Rectangle(bar_x, bar_y, int(bar_width * hp_percent), bar_height, 
                     "#FF4444" if hp_percent < 0.3 else ("#FFFF00" if hp_percent < 0.6 else "#00FF00")))
+          # Draw blood particles 
+        for blood in self.get_particles(BLOOD):
+            alpha = format(blood.attributes.get("alpha", 255), '02x')
+            color = f"#FF0000{alpha}"  # Red with transparency
+            frame.add_circle(Circle(blood.x, blood.y, blood.attributes.get("size", BLOOD_PARTICLE_SIZE), color))
         
         # 8. Draw damage numbers (very top layer)
         for damage_text in self.get_particles(DAMAGE_TEXT):
@@ -905,7 +902,7 @@ class Game(BaseGame):
         if actions is None:
             actions = []
             
-        # Toggle debug toolbar with F3 key
+        # Toggle debug toolbar with q key
         if "q" in actions:
             self.toggle_debug_toolbar()
             
@@ -2275,194 +2272,7 @@ class Game(BaseGame):
         # Move enemies towards player and check for despawning
         enemies_to_remove = []
         
-        # Process all types of enemies (regular and elite)
-        for enemy_type in [ENEMY, ENEMY_ELITE]:
-            for enemy in self.get_particles(enemy_type):
-                if enemy.attributes.get("is_dying"):
-                    continue  # 死亡动画期间不移动
-                    
-                # 边界强制反弹修正
-                safe_margin = 10
-                if enemy.x < safe_margin:
-                    enemy.x = safe_margin
-                if enemy.y < safe_margin:
-                    enemy.y = safe_margin
-                if enemy.x > SPATIAL_RESOLUTION - safe_margin:
-                    enemy.x = SPATIAL_RESOLUTION - safe_margin
-                if enemy.y > SPATIAL_RESOLUTION - safe_margin:
-                    enemy.y = SPATIAL_RESOLUTION - safe_margin
-                    
-                # Calculate direction to player
-                dx = player.x - enemy.x
-                dy = player.y - enemy.y
-                dist = math.sqrt(dx * dx + dy * dy)
-                
-                # 如果方向为0，直接赋值为(1,1)
-                if dx == 0 and dy == 0:
-                    dx, dy = 1, 1
-                    dist = math.sqrt(2)
-                    
-                # Check if enemy should despawn due to distance
-                if dist > DESPAWN_DISTANCE:
-                    enemies_to_remove.append(enemy)
-                    continue
-                    
-                # 处理敌人之间的碰撞
-                total_repulsion_x = 0
-                total_repulsion_y = 0
-                collision_count = 0
-                
-                # 检查与其他敌人的碰撞
-                for other_type in [ENEMY, ENEMY_ELITE]:
-                    for other in self.get_particles(other_type):
-                        if other == enemy or other.attributes.get("is_dying"):
-                            continue
-                            
-                        # 检查碰撞
-                        is_colliding, cdx, cdy, cdist = self.check_enemy_collision(enemy, other)
-                        if is_colliding:
-                            collision_count += 1
-                            # 计算排斥力（越近排斥力越大）
-                            if cdist > 0:
-                                # 使用非线性排斥力，让近距离排斥更强
-                                repulsion = 10 * (1.0 - cdist / ((ENEMY_SIZE + ENEMY_SIZE) * 1.5)) ** 2
-                                # 归一化方向向量
-                                total_repulsion_x -= (cdx / cdist) * repulsion
-                                total_repulsion_y -= (cdy / cdist) * repulsion
-                
-                # 如果发生碰撞，应用排斥力
-                if collision_count > 0:
-                    # 归一化总排斥力
-                    repulsion_magnitude = math.sqrt(total_repulsion_x**2 + total_repulsion_y**2)
-                    if repulsion_magnitude > 0:
-                        total_repulsion_x /= repulsion_magnitude
-                        total_repulsion_y /= repulsion_magnitude
-                        
-                        # 增加排斥力的影响权重
-                        dx = dx/dist * 0.3 + total_repulsion_x * 0.7
-                        dy = dy/dist * 0.3 + total_repulsion_y * 0.7
-                        
-                        # 重新归一化最终方向
-                        final_magnitude = math.sqrt(dx**2 + dy**2)
-                        if final_magnitude > 0:
-                            dx /= final_magnitude
-                            dy /= final_magnitude
-                else:
-                    # 没有碰撞时正常归一化方向
-                    dx /= dist
-                    dy /= dist
-                
-                # Apply movement
-                speed = enemy.attributes.get("speed", 1) * ENEMY_SPEED_REDUCTION
-                if enemy.kind == ENEMY_ELITE:
-                    speed *= ELITE_SPEED_MULTIPLIER
-                
-                # 处理击退效果
-                knockback_timer = enemy.attributes.get("knockback_timer", 0)
-                if knockback_timer > 0:
-                    knockback_dx = enemy.attributes.get("knockback_dx", 0)
-                    knockback_dy = enemy.attributes.get("knockback_dy", 0)
-                    enemy.x += knockback_dx * KNOCKBACK_DISTANCE
-                    enemy.y += knockback_dy * KNOCKBACK_DISTANCE
-                    enemy.attributes["knockback_timer"] = knockback_timer - 1
-                else:
-                    # 正常移动（考虑碰撞后的方向）
-                    enemy.x += dx * speed
-                    enemy.y += dy * speed
-
-                # Check for collisions with player
-                if not player.attributes.get("is_invincible", False):
-                    # 根据敌人类型确定碰撞尺寸
-                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
-                    if self.check_collision(player, enemy, PLAYER_SIZE, enemy_size):
-                        # Apply damage to player
-                        damage = enemy.attributes.get("damage", 1)
-                        if enemy.kind == ENEMY_ELITE:
-                            damage *= 2  # Elite enemies deal double damage
-                        
-                        
-                        
-                        is_alive = self.apply_damage(enemy, player, damage)
-                        if not is_alive:
-                            self.game_state = STATE_GAME_OVER
-                            return
-                            
-                        # 添加流血效果
-                        self.spawn_blood_effect(player.x, player.y)
-                        # Make player invincible briefly
-                        player.attributes["is_invincible"] = True
-                        player.attributes["invincible_timer"] = 10  # 1 second at 60fps
-                        # Set player damage effect
-                        player.attributes["damage_effect_timer"] = 10  # 2 frames of red flash
-                        # Move enemy away slightly to prevent continuous damage
-                        enemy.x = enemy.x - dx * 10
-                        enemy.y = enemy.y - dy * 10
-
-                # Check for collisions with weapons
-                for weapon in self.get_particles(WEAPON):
-                    # 根据敌人类型确定碰撞尺寸
-                    enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
-                    if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
-                        
-
-                        
-                        # Apply damage to enemy using health system
-                        weapon_damage = weapon.attributes["damage"]
-                        
-                        # Store old HP value for damage calculation
-                        old_hp = enemy.health_system.current_hp if enemy.health_system else 0
-                        
-                        # 将闪烁效果改为变白效果
-                        enemy.attributes["white_effect_timer"] = 6  # 0.1秒 = 6帧
-                        
-                        # Apply damage using health system
-                        is_alive = self.apply_damage(weapon, enemy, weapon_damage)
-                        
-                        # 再次保护武器颜色
-                        self.protect_weapon_colors(weapon)
-                        
-                        # Calculate actual damage dealt
-                        if enemy.health_system:
-                            actual_damage = old_hp - enemy.health_system.current_hp
-                        else:
-                            actual_damage = weapon_damage
-                        
-                        # Apply knockback effect
-                        knockback_dx = enemy.x - player.x
-                        knockback_dy = enemy.y - player.y
-                        
-                        # Normalize direction vector
-                        knockback_dist = math.sqrt(knockback_dx * knockback_dx + knockback_dy * knockback_dy)
-                        if knockback_dist > 0:
-                            knockback_dx /= knockback_dist
-                            knockback_dy /= knockback_dist
-                        else:
-                            knockback_dx = random.uniform(-1, 1)
-                            knockback_dy = random.uniform(-1, 1)
-                        
-                        # Set knockback attributes
-                        enemy.attributes["knockback_timer"] = KNOCKBACK_DURATION
-                        enemy.attributes["knockback_dx"] = knockback_dx
-                        enemy.attributes["knockback_dy"] = knockback_dy
-                        
-                        # Create damage text particle
-                        self.spawn_damage_text(enemy.x, enemy.y, actual_damage)
-                        
-                        # If enemy died, handle it
-                        if not is_alive:
-                            self.score += 10
-                            
-                            # 50% chance to drop XP (or always drop for elites)
-                            if enemy.kind == ENEMY_ELITE or random.random() < XP_DROP_CHANCE:
-                                self.spawn_xp(enemy.x, enemy.y)
-                            # 开始死亡动画
-                            enemy.attributes["is_dying"] = True
-                            enemy.attributes["death_anim_timer"] = 30
-                            enemy.attributes["death_anim_size"] = enemy_size
-                            enemy.attributes["death_anim_white"] = False
-
-
-        # Note: Debug toolbar should only be drawn in draw_debug_toolbar method, not in step
+       
 
         # 经验拾取判定
         xp_to_remove = []

@@ -10,6 +10,11 @@ from base_game import (
 )
 from graphics import Frame, Rectangle, Text, Circle, Triangle, Cross
 
+# 空间分区常量
+GRID_SIZE = 100  # 网格大小
+GRID_COLS = SPATIAL_RESOLUTION // GRID_SIZE + 1
+GRID_ROWS = SPATIAL_RESOLUTION // GRID_SIZE + 1
+
 # Particle types
 PLAYER = "player"
 ENEMY = "enemy"
@@ -32,14 +37,20 @@ ELITE_SIZE = int(40 * 0.4)
 WEAPON_SIZE = int(15 * 0.4)
 XP_SIZE = int(10 * 0.4)
 PLAYER_SPEED = 5
-ENEMY_SPEED_MIN = 3
-ENEMY_SPEED_MAX = 4
-ELITE_SPEED_MULTIPLIER = 1.5  # Elite enemies move faster
-ENEMY_SPEED_REDUCTION = 0.2  # 全局敌人速度减速系数
+ENEMY_SPEED_MIN = 2
+ENEMY_SPEED_MAX = 3
+ELITE_SPEED_MULTIPLIER = 1.2  # Elite enemies move faster
+ENEMY_SPEED_REDUCTION = 0.5  # 全局敌人速度减速系数
 WEAPON_SPEED = 8
 WEAPON_COOLDOWN = 30
-MAX_ENEMIES = 60  # 优化：减少最大敌人数
+MAX_ENEMIES = 50  # 优化：减少最大敌人数
 MAX_WEAPONS = 4   # 优化：减少最大武器数
+MAX_DAMAGE_TEXTS = 20  # 限制同时存在的伤害数字
+MAX_BLOOD_PARTICLES = 16  # 限制血液粒子数量
+BLOOD_PARTICLE_COUNT = 4  # 每次生成的血液粒子数量
+BLOOD_PARTICLE_SIZE = 2  # 血液粒子大小
+BLOOD_PARTICLE_SPEED = 6  # 血液粒子初始速度
+BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
 DESPAWN_DISTANCE = 1.5 * SPATIAL_RESOLUTION  # Distance at which enemies despawn
 FRAMES_PER_MINUTE = 60 * 60  # 60fps * 60 seconds
 WAVE_INTERVAL = FRAMES_PER_MINUTE  # One wave per minute
@@ -51,6 +62,8 @@ DAMAGE_TEXT_RISE = 50  # 伤害数字上升距离
 MIN_ENEMIES_PER_WAVE = 30  # 提高最小敌人数
 XP_DROP_CHANCE = 0.5  # 50% chance to drop XP when enemy dies
 ELITE_HEALTH_MULTIPLIER = 5  # Elite enemies have 5x normal health
+BASE_ENEMY_HEALTH = 10  # Base health for normal enemies
+ELITE_ENEMY_HEALTH = BASE_ENEMY_HEALTH * ELITE_HEALTH_MULTIPLIER  # Elite enemy health (50)
 XP_MAGNET_RANGE = 80  # Range at which XP starts moving toward player
 XP_MAGNET_SPEED_MIN = int(2 * 0.7)
 XP_MAGNET_SPEED_MAX = int(15 * 0.7)
@@ -342,9 +355,6 @@ WEAPON_COLORS = {
 
 BLOOD_PARTICLE_COUNT = 8  # 每次受伤产生的血液粒子数量
 BLOOD_PARTICLE_SIZE = 3   # 血液粒子大小
-BLOOD_PARTICLE_SPEED = 6  # 血液粒子初始速度
-BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
-
 class Game(BaseGame):
     def __init__(self):
         """Initialize the game"""
@@ -353,7 +363,92 @@ class Game(BaseGame):
         self.next_id = 0
         self.game_state = STATE_START_MENU
         self.show_debug_toolbar = True  # Initialize debug toolbar visibility flag
-        self.last_move_dir = [0, 0]  # Store last movement direction for weapon aiming
+        
+        # 初始化空间网格
+        self.spatial_grid = {}
+        
+        # 移动和武器系统
+        self.last_move_dir = (1, 0)  # 默认向右
+        self.knife_projectile_timer = 0
+        
+        # 游戏状态变量
+        self.available_upgrades = []
+        self.selected_upgrade_index = 0
+        self.frame_count = 0
+        self.kill_count = 0
+        self.elite_kill_count = 0
+        self.last_spawn_time = 0
+        self.last_elite_spawn_time = 0
+        self.spawn_cooldown = 60
+        self.elite_spawn_cooldown = 300
+        self.wave_number = 0
+        self.last_wave_time = 0
+        self.wave_interval = 1800  # 30 seconds at 60fps
+        
+        # 分数系统
+        self.score = 0
+        self.level = 1
+        self.xp = 0
+        self.xp_to_next_level = self.level * 50
+        
+        # 计时器
+        self.last_reset = 0
+        self.game_timer = 0
+        self.wave_timer = 0
+        self.current_wave = 0
+        self.min_enemies_per_wave = MIN_ENEMIES_PER_WAVE
+        self.next_spawn_timer = 0
+        
+        # 生命值动画系统
+        self.hp_displayed = 100  # 平滑显示的HP
+        self.hp_transition_timer = 0  # HP过渡动画计时器
+        self.hp_blink_timer = 0  # HP闪烁效果计时器
+        self.hp_section = 5  # HP阈值区间 (100/20 = 5)
+        
+        # 升级菜单
+        self.upgrade_options = []
+        
+        # 鼠标处理
+        self.mouse_pos = (0, 0)
+        self.mouse_clicked = False
+        
+        # 特效计数器
+        self.damage_text_count = 0
+        self.blood_particle_count = 0
+        
+        # 初始化游戏
+        self.initialize_game()
+        self.set_system_prompt(
+            "Vampire Survivors-like game. Survive as long as possible by collecting XP and leveling up. "
+            "Enemies will spawn from the edges of the screen and chase you. "
+            "Your weapons will automatically orbit around you and attack nearby enemies."
+        )
+
+    def update_spatial_grid(self):
+        """更新空间网格"""
+        self.spatial_grid.clear()
+        for particle in self.particles:
+            if particle.kind in [ENEMY, ENEMY_ELITE, WEAPON, PLAYER]:
+                grid_x = int(particle.x // GRID_SIZE)
+                grid_y = int(particle.y // GRID_SIZE)
+                grid_key = (grid_x, grid_y)
+                if grid_key not in self.spatial_grid:
+                    self.spatial_grid[grid_key] = []
+                self.spatial_grid[grid_key].append(particle)
+
+    def get_nearby_particles(self, x, y, radius):
+        """获取指定位置附近的粒子"""
+        grid_x_start = int((x - radius) // GRID_SIZE)
+        grid_x_end = int((x + radius) // GRID_SIZE)
+        grid_y_start = int((y - radius) // GRID_SIZE)
+        grid_y_end = int((y + radius) // GRID_SIZE)
+        
+        nearby = []
+        for gx in range(grid_x_start, grid_x_end + 1):
+            for gy in range(grid_y_start, grid_y_end + 1):
+                if (gx, gy) in self.spatial_grid:
+                    nearby.extend(self.spatial_grid[(gx, gy)])
+        return nearby
         self.available_upgrades = []
         self.selected_upgrade_index = 0
         self.frame_count = 0
@@ -385,7 +480,7 @@ class Game(BaseGame):
         self.hp_displayed = 100  # The smoothly displayed HP (for animation)
         self.hp_transition_timer = 0  # Timer for HP transition animation
         self.hp_blink_timer = 0  # Timer for HP blinking effect
-        self.hp_section = 5  # HP threshold sections (100/20 = 5 sections)
+        self.hp_section = 5  # HP threshold for each section of health bar
         
         # Upgrade menu variables
         self.upgrade_options = []
@@ -393,6 +488,11 @@ class Game(BaseGame):
         # Mouse handling
         self.mouse_pos = (0, 0)
         self.mouse_clicked = False
+        
+        # 初始化空间网格
+        self.spatial_grid = {}
+        self.damage_text_count = 0
+        self.blood_particle_count = 0
         
         self.initialize_game()
         self.set_system_prompt(
@@ -694,8 +794,6 @@ class Game(BaseGame):
             frame.add_rectangle(Rectangle(button_x_plus, toolbar_y + 20, DEBUG_BUTTON_WIDTH, DEBUG_BUTTON_HEIGHT, plus_color))
             frame.add_text(Text(button_x_plus + DEBUG_BUTTON_WIDTH/2 - 5, toolbar_y + 40, "+", "#FFFFFF", DEBUG_FONT_SIZE))
             
-            if is_minus_hovered or is_plus_hovered:
-                print(f"[DEBUG] {weapon_name} button hover - Minus: {is_minus_hovered}, Plus: {is_plus_hovered}")
 
     def initialize_game(self):
         """Initialize game state without resetting score, etc."""
@@ -810,15 +908,12 @@ class Game(BaseGame):
         # Toggle debug toolbar with F3 key
         if "q" in actions:
             self.toggle_debug_toolbar()
-            print("[DEBUG] Debug toolbar toggled:", self.show_debug_toolbar)
             
         self.mouse_pos = mouse_pos if mouse_pos else (0, 0)
         self.mouse_clicked = mouse_clicked
         
         # Print mouse info when clicked
-        if self.mouse_clicked:
-            print(f"[DEBUG] Mouse clicked at: ({self.mouse_pos[0]}, {self.mouse_pos[1]})")
-        
+       
         if self.game_state == STATE_START_MENU:
             # Handle start menu input
             if self.mouse_clicked:
@@ -830,7 +925,6 @@ class Game(BaseGame):
                     button_x, button_y,
                     BUTTON_WIDTH, BUTTON_HEIGHT
                 ):
-                    print("[DEBUG] Start button clicked!")
                     self.reset_game()
                     self.game_state = STATE_PLAYING
         
@@ -855,10 +949,7 @@ class Game(BaseGame):
                     level = weapons.get(weapon_name, 0)
                     button_x = 200 + i * (DEBUG_BUTTON_WIDTH * 2 + DEBUG_BUTTON_SPACING)
                     
-                    # Print button positions for debugging
-                    print(f"[DEBUG] {weapon_name} buttons - Minus: ({button_x}, {toolbar_y + 20}), Plus: ({button_x + DEBUG_BUTTON_WIDTH + 2}, {toolbar_y + 20})")
-                    
-                    # Check minus button
+                   # Check minus button
                     if self.is_point_in_rect(
                         self.mouse_pos[0], self.mouse_pos[1],
                         button_x, toolbar_y + 20,
@@ -1007,13 +1098,7 @@ class Game(BaseGame):
         distance = math.sqrt(dx * dx + dy * dy)
         collision = distance < (size1 + size2) / 2
         
-        # 打印碰撞信息用于调试
-        if collision and (particle1.kind == WEAPON or particle2.kind == WEAPON):
-            weapon = particle1 if particle1.kind == WEAPON else particle2
-            weapon_name = weapon.attributes.get("weapon_name", "未知")
-            if not weapon.attributes.get("is_knife", False):  # 只打印非飞刀的碰撞信息
-                print(f"检测到碰撞: {weapon_name} 距离: {distance:.2f}, 碰撞阈值: {(size1 + size2) / 2:.2f}")
-            
+       
         return collision
     
     def show_upgrade_menu(self):
@@ -1125,8 +1210,8 @@ class Game(BaseGame):
         self.game_state = STATE_GAME_OVER
 
     def reset_level(self):
-        print(f"Resetting level after {self.num_steps - self.last_reset} steps")
-        self.last_reset = self.num_steps
+        print("Resetting level")
+        self.last_reset = 0
         self.clear_particles()
         self.next_id = 0
         player_x = SPATIAL_RESOLUTION // 2
@@ -1786,6 +1871,9 @@ class Game(BaseGame):
         if player is None:
             self.show_game_over()
             return
+            
+        # 更新空间网格
+        self.update_spatial_grid()
         
         # 每900帧（15秒）输出一次游戏状态（进一步减少日志）
         if self.game_timer % 900 == 0:
@@ -2008,7 +2096,6 @@ class Game(BaseGame):
                         
                         # 如果没有圣经在场上，且冷却时间结束，则生成新的
                         if not existing_bibles and current_cooldown <= 0:
-                            print(f"生成新的圣经，当前冷却: {current_cooldown}")
                             # 获取当前等级的属性
                             lvl = min(level, len(KING_BIBLE_LEVELS)) - 1
                             props = KING_BIBLE_LEVELS[lvl]
@@ -2293,17 +2380,7 @@ class Game(BaseGame):
                         if enemy.kind == ENEMY_ELITE:
                             damage *= 2  # Elite enemies deal double damage
                         
-                        # 检查玩家是否有大蒜武器，如果有，不应该阻止碰撞，但应该减少伤害
-                        has_garlic = False
-                        garlic_level = 0
-                        if "weapons" in player.attributes:
-                            weapons = player.attributes["weapons"]
-                            if "Garlic" in weapons:
-                                has_garlic = True
-                                garlic_level = weapons["Garlic"]
-                                # 大蒜等级越高，伤害减免越多
-                                damage_reduction = min(0.9, 0.3 + (garlic_level - 1) * 0.1)  # 最多减免90%伤害
-                                damage = max(1, int(damage * (1 - damage_reduction)))  # 至少造成1点伤害
+                        
                         
                         is_alive = self.apply_damage(enemy, player, damage)
                         if not is_alive:
@@ -2327,18 +2404,7 @@ class Game(BaseGame):
                     enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
                     if self.check_collision(weapon, enemy, WEAPON_SIZE, enemy_size):
                         
-                        # 十字架特殊处理：击中敌人后开始返回
-                        if weapon.attributes.get("weapon_name") == "Cross" and not weapon.attributes.get("has_hit"):
-                            weapon.attributes["has_hit"] = True
-                            weapon.attributes["is_returning"] = True
-                            # 计算返回方向（与当前方向相反）
-                            current_angle = weapon.attributes.get("angle", 0)
-                            return_angle = (current_angle + 180) % 360
-                            rad = math.radians(return_angle)
-                            return_speed = weapon.attributes.get("original_speed", 8) * weapon.attributes.get("return_speed_multiplier", 1.5)
-                            weapon.attributes["vx"] = math.cos(rad) * return_speed
-                            weapon.attributes["vy"] = math.sin(rad) * return_speed
-                            weapon.attributes["angle"] = return_angle
+
                         
                         # Apply damage to enemy using health system
                         weapon_damage = weapon.attributes["damage"]
@@ -3055,6 +3121,68 @@ class Game(BaseGame):
             
             # Handle other weapon types...
 
+        # 优化：使用空间网格进行碰撞检测
+        for weapon in self.get_particles(WEAPON):
+            if weapon.attributes.get("is_aura"):
+                continue
+                
+            weapon_size = weapon.attributes.get("size", WEAPON_SIZE)
+            # 获取武器附近的粒子
+            nearby_enemies = self.get_nearby_particles(weapon.x, weapon.y, weapon_size * 2)
+            
+            for enemy in nearby_enemies:
+                if enemy.kind not in [ENEMY, ENEMY_ELITE] or enemy.attributes.get("is_dying"):
+                    continue
+                    
+                enemy_size = ELITE_SIZE if enemy.kind == ENEMY_ELITE else ENEMY_SIZE
+                if self.check_collision(weapon, enemy, weapon_size, enemy_size):
+                    # 处理武器和敌人的碰撞
+                    damage = weapon.attributes.get("damage", 1)
+                    self.apply_damage(weapon, enemy, damage)
+                    
+                    # 处理击退效果
+                    if not enemy.attributes.get("is_dying"):
+                        knockback = weapon.attributes.get("knockback", 1.0)
+                        if knockback > 0:
+                            dx = enemy.x - weapon.x
+                            dy = enemy.y - weapon.y
+                            dist = math.sqrt(dx * dx + dy * dy)
+                            if dist > 0:
+                                enemy.attributes["knockback_timer"] = KNOCKBACK_DURATION
+                                enemy.attributes["knockback_dx"] = dx / dist
+                                enemy.attributes["knockback_dy"] = dy / dist
+
+        # 优化：使用空间网格处理敌人之间的碰撞
+        for enemy1 in self.get_particles(ENEMY) + self.get_particles(ENEMY_ELITE):
+            if enemy1.attributes.get("is_dying"):
+                continue
+                
+            enemy1_size = ELITE_SIZE if enemy1.kind == ENEMY_ELITE else ENEMY_SIZE
+            nearby_enemies = self.get_nearby_particles(enemy1.x, enemy1.y, enemy1_size * 2)
+            
+            for enemy2 in nearby_enemies:
+                if (enemy2.kind not in [ENEMY, ENEMY_ELITE] or 
+                    enemy2.attributes.get("is_dying") or 
+                    enemy2 is enemy1):
+                    continue
+                    
+                enemy2_size = ELITE_SIZE if enemy2.kind == ENEMY_ELITE else ENEMY_SIZE
+                is_colliding, dx, dy, dist = self.check_enemy_collision(enemy1, enemy2)
+                
+                if is_colliding and dist > 0:
+                    # 应用排斥力
+                    repulsion = 0.5  # 排斥力强度
+                    enemy1.x -= (dx / dist) * repulsion
+                    enemy1.y -= (dy / dist) * repulsion
+                    enemy2.x += (dx / dist) * repulsion
+                    enemy2.y += (dy / dist) * repulsion
+                    
+                    # 确保敌人不会移出屏幕
+                    enemy1.x = max(0, min(SPATIAL_RESOLUTION, enemy1.x))
+                    enemy1.y = max(0, min(SPATIAL_RESOLUTION, enemy1.y))
+                    enemy2.x = max(0, min(SPATIAL_RESOLUTION, enemy2.x))
+                    enemy2.y = max(0, min(SPATIAL_RESOLUTION, enemy2.y))
+
     def agent_action(self, last_action=None):
         """
         AI agent that tries to avoid enemies and collect XP
@@ -3317,24 +3445,31 @@ class Game(BaseGame):
         ))
 
     def spawn_damage_text(self, x, y, damage_amount):
-        # Format damage as int
+        """优化的伤害文本生成"""
         if int(damage_amount) <= 0:
             return  # 伤害为0不显示跳字
-        damage_text = str(int(damage_amount))
-        """生成伤害数字文本"""
+            
+        # 限制同时存在的伤害文本数量
+        damage_texts = [p for p in self.particles if p.kind == DAMAGE_TEXT]
+        if len(damage_texts) >= MAX_DAMAGE_TEXTS:
+            # 找到最旧的伤害文本并移除
+            oldest_text = min(damage_texts, key=lambda p: p.attributes.get("timer", 0))
+            self.remove_particle(oldest_text)
+            
+        # 如果没有可合并的，创建新的伤害文本
         self.particles.append(
             Particle(
                 DAMAGE_TEXT,
                 x,
                 y,
                 attributes={
-                    "text": damage_text,
+                    "text": str(int(damage_amount)),
                     "timer": DAMAGE_TEXT_DURATION,
                     "id": self.next_id,
-                    "alpha": 255,  # 初始透明度
-                    "scale": 0.5,  # 初始尺寸为50%
-                    "scale_phase": "grow",  # 尺寸变化阶段：grow（变大）或shrink（变小）
-                    "color": "#FFFFFF"  # 固定为白色
+                    "alpha": 255,
+                    "scale": 0.5,
+                    "scale_phase": "grow",
+                    "color": "#FFFFFF"
                 }
             )
         )
@@ -3432,13 +3567,19 @@ class Game(BaseGame):
         return distance < repulsion_range, dx, dy, distance
 
     def spawn_blood_effect(self, x, y):
-        """在指定位置产生流血效果"""
-        for _ in range(BLOOD_PARTICLE_COUNT):
-            # 随机角度
+        """优化的血液效果生成"""
+        # 限制同时存在的血液粒子数量
+        blood_particles = [p for p in self.particles if p.kind == BLOOD]
+        if len(blood_particles) >= MAX_BLOOD_PARTICLES:
+            return
+            
+        # 计算可以生成的新粒子数量
+        available_slots = MAX_BLOOD_PARTICLES - len(blood_particles)
+        count = min(BLOOD_PARTICLE_COUNT, available_slots)
+        
+        for _ in range(count):
             angle = random.uniform(0, 2 * math.pi)
-            # 随机速度
             speed = random.uniform(BLOOD_PARTICLE_SPEED * 0.5, BLOOD_PARTICLE_SPEED)
-            # 计算速度分量
             vx = math.cos(angle) * speed
             vy = math.sin(angle) * speed
             
@@ -3453,7 +3594,7 @@ class Game(BaseGame):
                         "vy": vy,
                         "lifetime": BLOOD_PARTICLE_LIFETIME,
                         "size": BLOOD_PARTICLE_SIZE,
-                        "alpha": 255  # 初始不透明度
+                        "alpha": 255
                     }
                 )
             )

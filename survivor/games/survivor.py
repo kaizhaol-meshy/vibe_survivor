@@ -12,8 +12,8 @@ from graphics import Frame, Rectangle, Text, Circle, Triangle, Cross
 
 # 空间分区常量
 GRID_SIZE = 100  # 网格大小
-GRID_COLS = SPATIAL_RESOLUTION // GRID_SIZE + 1
-GRID_ROWS = SPATIAL_RESOLUTION // GRID_SIZE + 1
+GRID_COLS = SCREEN_WIDTH // GRID_SIZE + 1
+GRID_ROWS = SCREEN_HEIGHT // GRID_SIZE + 1
 
 # Particle types
 PLAYER = "player"
@@ -50,10 +50,10 @@ BLOOD_PARTICLE_COUNT = 8  # 每次生成的血液粒子数量
 BLOOD_PARTICLE_SIZE = 5  # 血液粒子大小
 BLOOD_PARTICLE_SPEED = 8  # 血液粒子初始速度
 BLOOD_PARTICLE_LIFETIME = 20  # 血液粒子存活帧数
-DESPAWN_DISTANCE = 1.5 * SPATIAL_RESOLUTION  # Distance at which enemies despawn
+DESPAWN_DISTANCE = 1.5 * max(SCREEN_WIDTH, SCREEN_HEIGHT)  # Distance at which enemies despawn
 FRAMES_PER_MINUTE = 60 * 60  # 60fps * 60 seconds
 WAVE_INTERVAL = FRAMES_PER_MINUTE  # One wave per minute
-SPAWN_DISTANCE = SPATIAL_RESOLUTION * 1.1  # Distance from player to spawn enemies
+SPAWN_DISTANCE = max(SCREEN_WIDTH, SCREEN_HEIGHT) * 1.1  # Distance from player to spawn enemies
 KNOCKBACK_DISTANCE = 5  # Knockback distance in pixels
 KNOCKBACK_DURATION = 10  # Duration of knockback in frames
 DAMAGE_TEXT_DURATION = 30  # 伤害数字持续时间（1秒 = 60帧）
@@ -505,7 +505,7 @@ class Game(BaseGame):
         frame = Frame()
         
         # 1. Draw background
-        frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
+        frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#000000"))
         
       
         # 3. Draw aura effects (except Garlic)
@@ -821,8 +821,8 @@ class Game(BaseGame):
         
     def create_player(self):
         """Create the player particle"""
-        player_x = SPATIAL_RESOLUTION // 2
-        player_y = SPATIAL_RESOLUTION // 2
+        player_x = SCREEN_WIDTH // 2
+        player_y = SCREEN_HEIGHT // 2
         # 初始武器为1级圣经（KingBible），其他武器为0级
         weapons = {"KingBible": 1}
         
@@ -914,8 +914,8 @@ class Game(BaseGame):
             # Handle start menu input
             if self.mouse_clicked:
                 # Check if mouse is over start button
-                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
-                button_y = SPATIAL_RESOLUTION // 2 - 30
+                button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+                button_y = SCREEN_HEIGHT // 2 - 30
                 if self.is_point_in_rect(
                     self.mouse_pos[0], self.mouse_pos[1],
                     button_x, button_y,
@@ -997,8 +997,8 @@ class Game(BaseGame):
                 self.last_move_dir = [dx, dy]
             
             # Apply movement
-            player.x = max(0, min(SPATIAL_RESOLUTION, player.x + dx))
-            player.y = max(0, min(SPATIAL_RESOLUTION, player.y + dy))
+            player.x = int(max(PLAYER_SIZE // 2, min(SCREEN_WIDTH - PLAYER_SIZE // 2, player.x + dx)))
+            player.y = int(max(PLAYER_SIZE // 2, min(SCREEN_HEIGHT - PLAYER_SIZE // 2, player.y + dy)))
         
         elif self.game_state == STATE_UPGRADE_MENU:
             # Handle upgrade menu input
@@ -1046,9 +1046,9 @@ class Game(BaseGame):
         # 优化：只检测屏幕内的粒子
         if getattr(particle1, 'attributes', {}).get('is_dying') or getattr(particle2, 'attributes', {}).get('is_dying'):
             return False
-        if not (0 <= particle1.x <= SPATIAL_RESOLUTION and 0 <= particle1.y <= SPATIAL_RESOLUTION):
+        if not (0 <= particle1.x <= SCREEN_WIDTH and 0 <= particle1.y <= SCREEN_HEIGHT):
             return False
-        if not (0 <= particle2.x <= SPATIAL_RESOLUTION and 0 <= particle2.y <= SPATIAL_RESOLUTION):
+        if not (0 <= particle2.x <= SCREEN_WIDTH and 0 <= particle2.y <= SCREEN_HEIGHT):
             return False
 
         # 对于武器，获取其实际尺寸
@@ -1210,8 +1210,8 @@ class Game(BaseGame):
         self.last_reset = 0
         self.clear_particles()
         self.next_id = 0
-        player_x = SPATIAL_RESOLUTION // 2
-        player_y = SPATIAL_RESOLUTION // 2
+        player_x = SCREEN_WIDTH // 2
+        player_y = SCREEN_HEIGHT // 2
         # 只在新游戏时加1级圣经，调试工具可自由设为0
         if not hasattr(self, 'player_initialized') or not self.player_initialized:
             weapons = {"KingBible": 1}
@@ -1914,8 +1914,8 @@ class Game(BaseGame):
             if dx != 0 and dy != 0:
                 dx *= 0.7071
                 dy *= 0.7071
-            player.x = int(max(PLAYER_SIZE // 2, min(SPATIAL_RESOLUTION - PLAYER_SIZE // 2, player.x + dx)))
-            player.y = int(max(PLAYER_SIZE // 2, min(SPATIAL_RESOLUTION - PLAYER_SIZE // 2, player.y + dy)))
+            player.x = int(max(PLAYER_SIZE // 2, min(SCREEN_WIDTH - PLAYER_SIZE // 2, player.x + dx)))
+            player.y = int(max(PLAYER_SIZE // 2, min(SCREEN_HEIGHT - PLAYER_SIZE // 2, player.y + dy)))
             # 记录移动方向
             if dx != 0 or dy != 0:
                 norm = math.sqrt(dx*dx + dy*dy)
@@ -1961,8 +1961,8 @@ class Game(BaseGame):
                         knockback_force = knockback_remaining * knockback_remaining
                         enemy.x += enemy.attributes["knockback_dx"] * knockback_force * KNOCKBACK_DISTANCE
                         enemy.y += enemy.attributes["knockback_dy"] * knockback_force * KNOCKBACK_DISTANCE
-                        enemy.x = max(0, min(SPATIAL_RESOLUTION, enemy.x))
-                        enemy.y = max(0, min(SPATIAL_RESOLUTION, enemy.y))
+                        enemy.x = max(0, min(SCREEN_WIDTH, enemy.x))
+                        enemy.y = max(0, min(SCREEN_HEIGHT, enemy.y))
         
         # Update and process damage text particles
         damage_texts_to_remove = []
@@ -2257,8 +2257,8 @@ class Game(BaseGame):
                 self.protect_weapon_colors(weapon)
                 weapon.x += weapon.attributes["vx"]
                 weapon.y += weapon.attributes["vy"]
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
             # 其余武器移动逻辑...（保持原有）
@@ -2304,8 +2304,8 @@ class Game(BaseGame):
                     weapon.y += vy
                     weapon.attributes["last_vx"] = vx
                     weapon.attributes["last_vy"] = vy
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
             if wname == "MagicWand" and "target_id" not in weapon.attributes and "vx" in weapon.attributes and "vy" in weapon.attributes:
@@ -2315,8 +2315,8 @@ class Game(BaseGame):
                 weapon.y += vy
                 weapon.attributes["last_vx"] = vx
                 weapon.attributes["last_vy"] = vy
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
             # 十字架的移动逻辑
@@ -2380,8 +2380,8 @@ class Game(BaseGame):
                     weapon.attributes["angle"] = math.degrees(math.atan2(vy, vx))
                 
                 # 检查是否超出屏幕
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
                 
@@ -2489,10 +2489,10 @@ class Game(BaseGame):
                     enemy.x = safe_margin
                 if enemy.y < safe_margin:
                     enemy.y = safe_margin
-                if enemy.x > SPATIAL_RESOLUTION - safe_margin:
-                    enemy.x = SPATIAL_RESOLUTION - safe_margin
-                if enemy.y > SPATIAL_RESOLUTION - safe_margin:
-                    enemy.y = SPATIAL_RESOLUTION - safe_margin
+                if enemy.x > SCREEN_WIDTH - safe_margin:
+                    enemy.x = SCREEN_WIDTH - safe_margin
+                if enemy.y > SCREEN_HEIGHT - safe_margin:
+                    enemy.y = SCREEN_HEIGHT - safe_margin
                     
                 # Calculate direction to player
                 dx = player.x - enemy.x
@@ -2732,8 +2732,8 @@ class Game(BaseGame):
                 self.protect_weapon_colors(weapon)
                 weapon.x += weapon.attributes["vx"]
                 weapon.y += weapon.attributes["vy"]
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
             # 斧子的抛物线移动
@@ -2757,8 +2757,8 @@ class Game(BaseGame):
                         continue
                 
                 # 检查是否超出屏幕边界
-                if (weapon.x < -WEAPON_SIZE or weapon.x > SPATIAL_RESOLUTION + WEAPON_SIZE or
-                    weapon.y < -WEAPON_SIZE or weapon.y > SPATIAL_RESOLUTION + WEAPON_SIZE):
+                if (weapon.x < -WEAPON_SIZE or weapon.x > SCREEN_WIDTH + WEAPON_SIZE or
+                    weapon.y < -WEAPON_SIZE or weapon.y > SCREEN_HEIGHT + WEAPON_SIZE):
                     weapons_to_remove.append(weapon)
                 continue
             # 其他武器的移动逻辑...
@@ -2913,10 +2913,10 @@ class Game(BaseGame):
                     enemy2.y += (dy / dist) * repulsion
                     
                     # 确保敌人不会移出屏幕
-                    enemy1.x = max(0, min(SPATIAL_RESOLUTION, enemy1.x))
-                    enemy1.y = max(0, min(SPATIAL_RESOLUTION, enemy1.y))
-                    enemy2.x = max(0, min(SPATIAL_RESOLUTION, enemy2.x))
-                    enemy2.y = max(0, min(SPATIAL_RESOLUTION, enemy2.y))
+                    enemy1.x = max(0, min(SCREEN_WIDTH, enemy1.x))
+                    enemy1.y = max(0, min(SCREEN_HEIGHT, enemy1.y))
+                    enemy2.x = max(0, min(SCREEN_WIDTH, enemy2.x))
+                    enemy2.y = max(0, min(SCREEN_HEIGHT, enemy2.y))
 
     def agent_action(self, last_action=None):
         """
@@ -2927,8 +2927,8 @@ class Game(BaseGame):
             # Simulate clicks in different menu states
             if self.game_state == STATE_START_MENU:
                 # Click the start button
-                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
-                button_y = SPATIAL_RESOLUTION // 2 - 30
+                button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+                button_y = SCREEN_HEIGHT // 2 - 30
                 self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
                 return [False, False, False, False, False]
             
@@ -2943,8 +2943,8 @@ class Game(BaseGame):
                 
             elif self.game_state == STATE_GAME_OVER:
                 # Click the restart button
-                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
-                button_y = SPATIAL_RESOLUTION // 2 - 30
+                button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+                button_y = SCREEN_HEIGHT // 2 - 30
                 self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
                 return [False, False, False, False, False]
         
@@ -3042,11 +3042,11 @@ class Game(BaseGame):
         # 3. 边界检查
         if player.x < 100:  # 靠近左边界
             move_x += 1
-        elif player.x > SPATIAL_RESOLUTION - 100:  # 靠近右边界
+        elif player.x > SCREEN_WIDTH - 100:  # 靠近右边界
             move_x -= 1
         if player.y < 100:  # 靠近上边界
             move_y += 1
-        elif player.y > SPATIAL_RESOLUTION - 100:  # 靠近下边界
+        elif player.y > SCREEN_HEIGHT - 100:  # 靠近下边界
             move_y -= 1
 
         # 4. 归一化最终移动方向
@@ -3075,16 +3075,16 @@ class Game(BaseGame):
     def draw_start_menu(self, frame):
         """Draw the start menu screen"""
         # Background
-        frame.add_rectangle(Rectangle(0, 0, SPATIAL_RESOLUTION, SPATIAL_RESOLUTION, "#000000"))
+        frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#000000"))
         
         # Title
-        title_x = SPATIAL_RESOLUTION // 2 - 150
-        title_y = SPATIAL_RESOLUTION // 2 - 100
+        title_x = SCREEN_WIDTH // 2 - 150
+        title_y = SCREEN_HEIGHT // 2 - 100
         frame.add_text(Text(title_x, title_y, "Vampire Survivor", "#FFFFFF", 40))
         
         # Start button
-        button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
-        button_y = SPATIAL_RESOLUTION // 2 - 30  # Match the click detection position
+        button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+        button_y = SCREEN_HEIGHT // 2 - 30  # Match the click detection position
         
         # Button hover effect
         button_background = BUTTON_HOVER_COLOR if self.is_point_in_rect(
@@ -3106,8 +3106,8 @@ class Game(BaseGame):
         frame.add_text(Text(text_x, text_y, "Start", BUTTON_TEXT_COLOR, 20))
         
         # Instructions
-        instruction_x = SPATIAL_RESOLUTION // 2 - 140
-        instruction_y = SPATIAL_RESOLUTION // 2 + 50
+        instruction_x = SCREEN_WIDTH // 2 - 140
+        instruction_y = SCREEN_HEIGHT // 2 + 50
         frame.add_text(Text(instruction_x, instruction_y, 
             "WASD to move, survive as long as possible!", "#CCCCCC", 16))
 

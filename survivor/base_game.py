@@ -6,7 +6,7 @@ from health_system import HealthSystem
 SCREEN_WIDTH = 1024
 SCREEN_HEIGHT = 576
 
-SPATIAL_RESOLUTION = 1024
+SPATIAL_RESOLUTION = 576
 NUM_INPUTS = 4
 
 import random

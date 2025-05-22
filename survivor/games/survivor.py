@@ -302,7 +302,7 @@ WEAPON_TYPES = [
         "cooldown": 78,  # 1.3s = 78 frames at 60fps
         "projectile_interval": 0,
         "hitbox_delay": 0,
-        "knockback": 0.5,
+        "knockback": 0,
         "pool_limit": -1,  # Unlimited targets (AOE)
         "chance": 0,
         "crit_multi": 1.0,
@@ -688,15 +688,14 @@ class Game(BaseGame):
             base_size = 24  # 基础字号
             current_size = int(base_size * scale)  # 应用缩放
             alpha_hex = format(alpha, '02x')
-            
-            # 使用固定的白色，只改变透明度
-            frame.add_text(Text(
-                damage_text.x,
-                damage_text.y,
-                damage_text.attributes["text"],
-                f"#FFFFFF{alpha_hex}",  # 固定白色，只改变透明度
-                current_size
-            ))
+            text = damage_text.attributes["text"]
+            x = damage_text.x
+            y = damage_text.y
+            # 黑色描边（上下左右各1像素）
+            for dx, dy in [(-1,0),(1,0),(0,-1),(0,1)]:
+                frame.add_text(Text(x+dx, y+dy, text, f"#000000{alpha_hex}", current_size))
+            # 正常白色文字
+            frame.add_text(Text(x, y, text, f"#FFFFFF{alpha_hex}", current_size))
         
         # 9. Draw UI based on game state
         if self.game_state == STATE_UPGRADE_MENU:
@@ -856,7 +855,7 @@ class Game(BaseGame):
         self.score = 0
         self.level = 1
         self.xp = 0
-        self.xp_to_next_level = self.level * 50
+        self.xp_to_next_level = 150
         self.game_timer = 0
         self.current_wave = 0
         self.min_enemies_per_wave = MIN_ENEMIES_PER_WAVE
@@ -1315,7 +1314,7 @@ class Game(BaseGame):
                     "speed": elite_speed,
                     "base_hp": elite_health,
                     "max_hp": elite_health,
-                    "damage": 2,
+                    "damage": 10,
                     "id": self.next_id,
                     "blink_timer": 0,
                     "wave": self.current_wave,
@@ -1349,7 +1348,7 @@ class Game(BaseGame):
                     "speed": enemy_speed,
                     "base_hp": enemy_health,
                     "max_hp": enemy_health,
-                    "damage": 1,
+                    "damage": 5,
                     "id": self.next_id,
                     "blink_timer": 0,
                     "wave": self.current_wave,
@@ -2236,7 +2235,7 @@ class Game(BaseGame):
                                     self.apply_damage(weapon, enemy, damage)
                         
                                     # Apply knockback
-                                    knockback = weapon.attributes.get("knockback", 0.5)
+                                    knockback = weapon.attributes.get("knockback", 0)
                                     if knockback > 0 and dist > 0:
                                         # Calculate knockback direction (away from aura center)
                                         kdx = dx / dist
@@ -2271,67 +2270,7 @@ class Game(BaseGame):
                 
         # Move enemies towards player and check for despawning
         enemies_to_remove = []
-        
-       
 
-        # 经验拾取判定
-        xp_to_remove = []
-        for xp in self.get_particles(XP):
-            if self.check_collision(player, xp, PLAYER_SIZE, XP_SIZE):
-                xp_value = 10  # 默认经验值
-                self.xp += xp_value
-                player.attributes["xp"] = self.xp
-                if self.xp >= self.xp_to_next_level:
-                    self.level += 1
-                    self.xp -= self.xp_to_next_level
-                    self.xp_to_next_level = self.level * 50
-                    print("玩家升级! 新等级: {}".format(self.level))
-                    self.show_upgrade_menu()
-                xp_to_remove.append(xp)
-        for xp in xp_to_remove:
-            self.remove_particle(xp)
-
-        # XP吸附效果
-        for xp in self.get_particles(XP):
-            dx = player.x - xp.x
-            dy = player.y - xp.y
-            dist = math.sqrt(dx * dx + dy * dy)
-            if dist < XP_MAGNET_RANGE:
-                # 吸附标记
-                xp.attributes["moving_to_player"] = True
-                # 计算吸附速度
-                speed = xp.attributes.get("speed", XP_MAGNET_SPEED_MIN)
-                speed = min(speed + XP_ACCELERATION, XP_MAGNET_SPEED_MAX)
-                xp.attributes["speed"] = speed
-                # 单位向量
-                if dist > 0:
-                    dx /= dist
-                    dy /= dist
-                # 更新位置
-                xp.x += dx * speed
-                xp.y += dy * speed
-            else:
-                # 未吸附时速度归零
-                xp.attributes["speed"] = XP_MAGNET_SPEED_MIN
-                xp.attributes["moving_to_player"] = False
-
-        # 死亡动画处理
-        dying_enemies = [e for e in self.particles if e.kind in [ENEMY, ENEMY_ELITE] and e.attributes.get("is_dying")]
-        for enemy in dying_enemies:
-            timer = enemy.attributes.get("death_anim_timer", 0)
-            if timer > 0:
-                enemy.attributes["death_anim_timer"] -= 1
-                progress = 1 - enemy.attributes["death_anim_timer"] / 30
-                # 尺寸缩小
-                if enemy.kind == ENEMY:
-                    enemy.attributes["death_anim_size"] = ENEMY_SIZE * (1 - progress)
-                else:
-                    enemy.attributes["death_anim_size"] = ELITE_SIZE * (1 - progress)
-                # 颜色闪白
-                enemy.attributes["death_anim_white"] = True
-            else:
-                if enemy in self.particles:
-                    self.remove_particle(enemy)
 
         for weapon in self.get_particles(WEAPON):
             wname = weapon.attributes.get("weapon_name", "")
@@ -2643,18 +2582,7 @@ class Game(BaseGame):
                         if enemy.kind == ENEMY_ELITE:
                             damage *= 2  # Elite enemies deal double damage
                         
-                        # 检查玩家是否有大蒜武器，如果有，不应该阻止碰撞，但应该减少伤害
-                        has_garlic = False
-                        garlic_level = 0
-                        if "weapons" in player.attributes:
-                            weapons = player.attributes["weapons"]
-                            if "Garlic" in weapons:
-                                has_garlic = True
-                                garlic_level = weapons["Garlic"]
-                                # 大蒜等级越高，伤害减免越多
-                                damage_reduction = min(0.9, 0.3 + (garlic_level - 1) * 0.1)  # 最多减免90%伤害
-                                damage = max(1, int(damage * (1 - damage_reduction)))  # 至少造成1点伤害
-                        
+                       
                         is_alive = self.apply_damage(enemy, player, damage)
                         if not is_alive:
                             self.game_state = STATE_GAME_OVER
@@ -2732,11 +2660,8 @@ class Game(BaseGame):
                             enemy.attributes["is_dying"] = True
                             enemy.attributes["death_anim_timer"] = 30
                             enemy.attributes["death_anim_size"] = enemy_size
-                            enemy.attributes["death_anim_white"] = False
-                        else:
-                            # 如果敌人还活着，确保飞刀颜色不变
-                            if weapon.attributes.get("weapon_name") == "Knife":
-                                self.protect_weapon_colors(weapon)
+                            enemy.attributes["death_anim_white"] = True  # 改为True，使死亡时也显示闪白效果
+
 
         # Note: Debug toolbar should only be drawn in draw_debug_toolbar method, not in step
 
@@ -2750,7 +2675,7 @@ class Game(BaseGame):
                 if self.xp >= self.xp_to_next_level:
                     self.level += 1
                     self.xp -= self.xp_to_next_level
-                    self.xp_to_next_level = self.level * 50
+                    self.xp_to_next_level = 100 + self.level * 50
                     print("玩家升级! 新等级: {}".format(self.level))
                     self.show_upgrade_menu()
                 xp_to_remove.append(xp)
@@ -3002,8 +2927,9 @@ class Game(BaseGame):
             # Simulate clicks in different menu states
             if self.game_state == STATE_START_MENU:
                 # Click the start button
-                mouse_pos = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 80)
-                self.handle_input(None, mouse_pos, True)
+                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
+                button_y = SPATIAL_RESOLUTION // 2 - 30
+                self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
                 return [False, False, False, False, False]
             
             elif self.game_state == STATE_UPGRADE_MENU:
@@ -3017,77 +2943,132 @@ class Game(BaseGame):
                 
             elif self.game_state == STATE_GAME_OVER:
                 # Click the restart button
-                mouse_pos = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 80)
-                self.handle_input(None, mouse_pos, True)
+                button_x = SPATIAL_RESOLUTION // 2 - BUTTON_WIDTH // 2
+                button_y = SPATIAL_RESOLUTION // 2 - 30
+                self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
                 return [False, False, False, False, False]
         
         # Normal playing state AI
         player = self.get_particle(PLAYER)
         if not player:
-            return [False, False, False, False]
+            return [False, False, False, False, False]
 
-        # Get nearest enemy and XP
-        nearest_enemy = None
-        nearest_enemy_dist = float('inf')
-        nearest_xp = None
-        nearest_xp_dist = float('inf')
+        # 获取玩家当前生命值
+        player_hp = player.health_system.current_hp if player.health_system else 100
+        max_hp = player.health_system.max_hp if player.health_system else 100
+        hp_percent = player_hp / max_hp
 
+        # 收集所有敌人和XP的信息
+        enemies = []
         for enemy_type in [ENEMY, ENEMY_ELITE]:
             for enemy in self.get_particles(enemy_type):
                 dx = player.x - enemy.x
                 dy = player.y - enemy.y
                 dist = math.sqrt(dx * dx + dy * dy)
-                if dist < nearest_enemy_dist:
-                    nearest_enemy_dist = dist
-                    nearest_enemy = enemy
+                # 计算敌人的威胁度（精英敌人威胁更大）
+                threat = 2.0 if enemy_type == ENEMY_ELITE else 1.0
+                enemies.append({
+                    'enemy': enemy,
+                    'dist': dist,
+                    'dx': dx,
+                    'dy': dy,
+                    'threat': threat
+                })
 
+        # 按距离排序敌人
+        enemies.sort(key=lambda x: x['dist'])
+
+        # 收集所有XP的信息
+        xp_particles = []
         for xp in self.get_particles(XP):
             dx = player.x - xp.x
             dy = player.y - xp.y
             dist = math.sqrt(dx * dx + dy * dy)
-            if dist < nearest_xp_dist:
-                nearest_xp_dist = dist
-                nearest_xp = xp
+            xp_particles.append({
+                'xp': xp,
+                'dist': dist,
+                'dx': dx,
+                'dy': dy
+            })
 
-        # Default to random movement
-        move_left = False
-        move_right = False
-        move_up = False
-        move_down = False
+        # 按距离排序XP
+        xp_particles.sort(key=lambda x: x['dist'])
 
-        if random.random() < 0.1:
-            # Random movement
-            direction = random.randint(0, 3)
-            if direction == 0:
-                move_left = True
-            elif direction == 1:
-                move_right = True
-            elif direction == 2:
-                move_up = True
-            else:
-                move_down = True
-        else:
-            # Smart movement
-            if nearest_enemy and nearest_enemy_dist < 100:
-                # Move away from nearest enemy
-                if nearest_enemy.x > player.x:
-                    move_left = True
-                else:
-                    move_right = True
-                if nearest_enemy.y > player.y:
-                    move_up = True
-                else:
-                    move_down = True
-            elif nearest_xp:
-                # Move towards nearest XP
-                if nearest_xp.x < player.x:
-                    move_left = True
-                else:
-                    move_right = True
-                if nearest_xp.y < player.y:
-                    move_up = True
-                else:
-                    move_down = True
+        # 计算移动方向
+        move_x = 0
+        move_y = 0
+
+        # 1. 处理敌人威胁
+        if enemies:
+            # 计算所有敌人的威胁向量
+            threat_x = 0
+            threat_y = 0
+            total_threat = 0
+
+            # 考虑最近的3个敌人
+            for enemy_info in enemies[:3]:
+                # 根据距离计算威胁权重（越近威胁越大）
+                weight = enemy_info['threat'] / (enemy_info['dist'] + 1)
+                # 根据生命值调整威胁权重（生命值越低越谨慎）
+                if hp_percent < 0.3:  # 生命值低于30%时更谨慎
+                    weight *= 2
+                threat_x += enemy_info['dx'] * weight
+                threat_y += enemy_info['dy'] * weight
+                total_threat += weight
+
+            if total_threat > 0:
+                # 归一化威胁向量
+                threat_x /= total_threat
+                threat_y /= total_threat
+                # 将威胁向量转换为移动方向（远离威胁）
+                move_x -= threat_x
+                move_y -= threat_y
+
+        # 2. 处理XP收集
+        if xp_particles and (not enemies or enemies[0]['dist'] > 150):  # 只在安全时收集XP
+            nearest_xp = xp_particles[0]
+            # 计算到最近XP的方向
+            xp_dir_x = -nearest_xp['dx']
+            xp_dir_y = -nearest_xp['dy']
+            # 归一化方向向量
+            xp_dist = math.sqrt(xp_dir_x * xp_dir_x + xp_dir_y * xp_dir_y)
+            if xp_dist > 0:
+                xp_dir_x /= xp_dist
+                xp_dir_y /= xp_dist
+                # 将XP收集方向添加到移动方向
+                move_x += xp_dir_x * 0.5  # 降低XP收集的优先级
+                move_y += xp_dir_y * 0.5
+
+        # 3. 边界检查
+        if player.x < 100:  # 靠近左边界
+            move_x += 1
+        elif player.x > SPATIAL_RESOLUTION - 100:  # 靠近右边界
+            move_x -= 1
+        if player.y < 100:  # 靠近上边界
+            move_y += 1
+        elif player.y > SPATIAL_RESOLUTION - 100:  # 靠近下边界
+            move_y -= 1
+
+        # 4. 归一化最终移动方向
+        move_dist = math.sqrt(move_x * move_x + move_y * move_y)
+        if move_dist > 0:
+            move_x /= move_dist
+            move_y /= move_dist
+
+        # 5. 转换为按键输入
+        move_left = move_x < -0.3
+        move_right = move_x > 0.3
+        move_up = move_y < -0.3
+        move_down = move_y > 0.3
+
+        # 6. 特殊情况处理
+        if enemies and enemies[0]['dist'] < 50:  # 敌人非常近时
+            # 强制向远离最近敌人的方向移动
+            nearest = enemies[0]
+            move_left = nearest['dx'] < 0
+            move_right = nearest['dx'] > 0
+            move_up = nearest['dy'] < 0
+            move_down = nearest['dy'] > 0
 
         return [move_left, move_right, move_up, move_down, False]
 

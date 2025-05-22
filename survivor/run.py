@@ -30,7 +30,7 @@ def run(game_name, agent=False, gen_frames=0, port=0, save_name=None):
 
     states_all = []
     frame_count = 0
-    force_restart_interval = 250
+    force_restart_interval = float('inf')
     shuffled_copies = 5
 
     show_every = 1 if gen_frames == 0 else 1000

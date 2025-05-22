@@ -1,5 +1,5 @@
 class HealthSystem:
-    def __init__(self, base_hp=100, max_hp=None):
+    def __init__(self, base_hp=20, max_hp=None):
         """
         Initialize the health system for a character.
         

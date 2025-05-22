@@ -414,6 +414,16 @@ class Game(BaseGame):
         self.damage_text_count = 0
         self.blood_particle_count = 0
         
+        # 智能体相关
+        self.last_quadrant_check = 0  # 上次检查象限的时间
+        self.safe_quadrant = None  # 当前安全象限
+        self.quadrant_check_interval = 200  # 5秒检查一次 (60fps * 5)
+        self.last_move_x = 0  # 上一次移动的X方向
+        self.last_move_y = 0  # 上一次移动的Y方向
+        self.direction_change_threshold = 0.3  # 方向变化阈值
+        self.smoothing_factor = 0.7  # 平滑因子
+        self.current_game_state = {}  # 当前游戏状态
+        
         # 初始化游戏
         self.initialize_game()
         self.set_system_prompt(
@@ -2916,285 +2926,409 @@ class Game(BaseGame):
         return [False, False, False, False, False]
 
     def _analyze_game_state(self, player, health_percentage):
-        """Analyze the current game state."""
+        """分析游戏状态"""
         # 获取所有敌人
-        enemies = []
-        nearest_enemy = None
-        min_distance = float('inf')
+        enemies = self.get_particles(ENEMY) + self.get_particles(ENEMY_ELITE)
         
-        for enemy in self.get_particles(ENEMY):
-            dx = player.x - enemy.x
-            dy = player.y - enemy.y
+        # 计算每个敌人的威胁度
+        enemy_threats = []
+        for enemy in enemies:
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
             distance = math.sqrt(dx * dx + dy * dy)
             
-            # 计算威胁等级
-            threat_level = self._calculate_threat_level(enemy, distance, health_percentage)
-            
-            # 预测敌人位置
-            pred_x, pred_y = self._predict_enemy_position(enemy, dx, dy, distance)
-            
-            enemy_info = {
+            # 计算威胁度
+            threat = self._calculate_threat_level(enemy, distance, health_percentage)
+            enemy_threats.append({
                 "enemy": enemy,
                 "distance": distance,
-                "threat_level": threat_level,
-                "predicted_x": pred_x,
-                "predicted_y": pred_y
-            }
-            enemies.append(enemy_info)
+                "threat": threat
+            })
             
-            # 更新最近敌人
-            if distance < min_distance:
-                min_distance = distance
-                nearest_enemy = enemy_info
-        
-        # 检查是否被包围
+        # 检查是否被包围（直接传递Particle对象）
         is_surrounded = self._check_surrounded(enemies)
         
-        # 获取最近的经验值
+        # 检查是否在角落
+        is_corner = self._is_in_corner(player)
+        
+        # 获取最近的XP
         nearest_xp = self._find_nearest_xp(player)
         
+        # 返回游戏状态
         return {
-            "enemies": enemies,
+            "enemies": enemy_threats,
             "is_surrounded": is_surrounded,
+            "is_corner": is_corner,
             "nearest_xp": nearest_xp,
-            "health_percentage": health_percentage,
-            "player": player,
-            "nearest_enemy": nearest_enemy
+            "health_percentage": health_percentage
         }
 
     def _calculate_threat_level(self, enemy, distance, health_percentage):
-        """Calculate threat level for an enemy based on various factors."""
-        threat_level = 2.0 if enemy.kind == ENEMY_ELITE else 1.0
+        """计算敌人的威胁等级"""
+        threat = 2.0 if enemy.kind == ENEMY_ELITE else 1.0
         
-        # Adjust threat based on distance
+        # 根据距离调整威胁
         if distance < 100:
-            threat_level *= 2.0
+            threat *= 2.0
         elif distance < 200:
-            threat_level *= 1.5
+            threat *= 1.5
             
-        # Adjust threat based on health
+        # 根据生命值调整威胁
         if health_percentage < 0.3:
-            threat_level *= 1.5
+            threat *= 1.5
             
-        return threat_level
+        return threat
 
-    def _predict_enemy_position(self, enemy, dx, dy, distance):
-        """Predict enemy's position after a short time."""
-        if distance == 0:
-            return (enemy.x, enemy.y)
-            
-        enemy_speed = enemy.attributes.get("speed", ENEMY_SPEED_MIN)
-        prediction_frames = 10  # Predict 10 frames ahead
-        
-        predicted_x = enemy.x + (dx / distance) * enemy_speed * prediction_frames
-        predicted_y = enemy.y + (dy / distance) * enemy_speed * prediction_frames
-        
-        return (predicted_x, predicted_y)
-
-    def _check_surrounded(self, enemies):
-        """Check if player is surrounded by enemies."""
+    def _check_danger_state(self, player, enemies):
+        """检查玩家是否处于危险状态"""
         if not enemies:
-            return False
+            return False, False
             
-        # 计算敌人分布
-        angles = []
-        for enemy_info in enemies:
-            if enemy_info["distance"] > 300:  # 只考虑较近的敌人
-                continue
-                
-            enemy = enemy_info["enemy"]
-            dx = enemy.x - self.get_particle(PLAYER).x
-            dy = enemy.y - self.get_particle(PLAYER).y
-            angle = math.degrees(math.atan2(dy, dx))
-            angles.append(angle)
+        # 计算每个敌人到玩家的距离
+        enemy_distances = []
+        for enemy in enemies:
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            distance = math.sqrt(dx * dx + dy * dy)
+            enemy_distances.append((enemy, distance))
         
-        if len(angles) < 3:  # 至少需要3个敌人才能形成包围
-            return False
-            
-        # 检查角度分布
-        angles.sort()
-        max_gap = 0
-        for i in range(len(angles)):
-            gap = (angles[(i + 1) % len(angles)] - angles[i]) % 360
-            max_gap = max(max_gap, gap)
-            
-        # 如果最大间隙小于120度，认为被包围
-        return max_gap < 120
+        # 获取附近的敌人（距离小于150）
+        nearby_enemies = [e for e, d in enemy_distances if d < 150]
+        
+        # 检查是否有精英敌人
+        has_elite = any(e.kind == ENEMY_ELITE for e in nearby_enemies)
+        
+        # 检查是否被包围
+        is_surrounded = self._check_surrounded(nearby_enemies)
+        
+        # 检查是否在角落
+        is_corner = self._is_in_corner(player)
+        
+        # 如果满足以下任一条件，认为处于危险状态：
+        # 1. 附近有精英敌人
+        # 2. 被敌人包围
+        # 3. 在角落且有敌人接近
+        is_danger = has_elite or is_surrounded or (is_corner and len(nearby_enemies) > 0)
+        
+        return is_danger, is_corner
 
-    def _find_nearest_xp(self, player):
-        """Find the nearest XP particle if it's safe to collect."""
-        xp_particles = self.get_particles(XP)
-        if not xp_particles:
-            return None
-            
-        nearest_xp = min(xp_particles, key=lambda xp: 
-            (player.x - xp.x) ** 2 + (player.y - xp.y) ** 2)
-            
-        xp_dx = nearest_xp.x - player.x
-        xp_dy = nearest_xp.y - player.y
-        xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
+    def _is_in_corner(self, player):
+        """检查玩家是否在角落"""
+        corner_margin = 150  # 角落判定范围
         
-        if xp_dist < 200:  # Only consider close XP
-            return {
-                "xp": nearest_xp,
-                "dx": xp_dx,
-                "dy": xp_dy,
-                "distance": xp_dist
-            }
-        return None
+        # 检查是否在四个角落区域
+        is_left = player.x < corner_margin
+        is_right = player.x > SCREEN_WIDTH - corner_margin
+        is_top = player.y < corner_margin
+        is_bottom = player.y > SCREEN_HEIGHT - corner_margin
+        
+        # 检查是否在角落区域且被敌人包围
+        if (is_left or is_right) and (is_top or is_bottom):
+            # 获取附近的敌人
+            nearby_enemies = []
+            for enemy in self.get_particles(ENEMY) + self.get_particles(ENEMY_ELITE):
+                dx = enemy.x - player.x
+                dy = enemy.y - player.y
+                distance = math.sqrt(dx * dx + dy * dy)
+                if distance < 200:
+                    nearby_enemies.append(enemy)
+            
+            # 如果附近有敌人，认为处于危险角落
+            return len(nearby_enemies) > 0
+        
+        return False
 
-    def _calculate_movement(self, player, game_state, last_action):
-        """Calculate the movement direction for the agent."""
-        # 感知系统：获取玩家和敌人位置
-        player_pos = (player.x, player.y)
-        enemy_positions = [(enemy_info["enemy"].x, enemy_info["enemy"].y) for enemy_info in game_state["enemies"]]
-        
-        # 威胁评估：创建敌人密度图和预测威胁
-        threat_map = self._create_threat_map(player_pos, enemy_positions)
-        predicted_threats = self._predict_enemy_movements(player_pos, game_state["enemies"])
-        
-        # 检查是否处于危险状态
-        is_in_danger = self._check_danger_state(player, game_state["enemies"])
-        
+    def _calculate_emergency_escape(self, player, enemies, predicted_threats):
+        """Calculate the best emergency escape route."""
         # 检查是否在角落
         is_in_corner = self._is_in_corner(player)
         
-        if is_in_danger or is_in_corner:
-            # 紧急避险：寻找最安全的逃生路径
-            escape_path = self._calculate_emergency_escape(player, game_state["enemies"], predicted_threats)
-            if escape_path:
-                move_x, move_y = escape_path
-            else:
-                # 如果找不到逃生路径，使用预测性躲避
-                move_x, move_y = self._predictive_dodge(player, game_state["enemies"])
+        # 如果在角落，使用更激进的突围策略
+        if is_in_corner:
+            return self._calculate_breakthrough(player, enemies)
+        
+        # 计算敌人群的中心点
+        if isinstance(enemies[0], dict):
+            enemy_objects = [e["enemy"] for e in enemies]
         else:
-            # 正常状态下的移动决策
-            if game_state["is_surrounded"]:
-                # 逃脱机制：寻找最弱围堵点
-                escape_direction = self._find_escape_direction(player_pos, enemy_positions, threat_map)
-                move_x, move_y = escape_direction
-            else:
-                # 在安全区域内，选择最近经验球所在方向
-                nearest_xp = self._find_nearest_xp(player)
-                if nearest_xp and self._is_safe_to_collect_xp(player, game_state):
-                    xp_dx = nearest_xp.x - player.x
-                    xp_dy = nearest_xp.y - player.y
-                    xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
-                    if xp_dist > 0:
-                        move_x = xp_dx / xp_dist
-                        move_y = xp_dy / xp_dist
-                else:
-                    # 选择威胁最小的方向
-                    move_x, move_y = self._find_safest_direction(player_pos, threat_map)
-        
-        # 移动平滑策略
-        if last_action:
-            move_x, move_y = self._smooth_movement(move_x, move_y, last_action)
-        
-        return move_x, move_y
-
-    def _create_threat_map(self, player_pos, enemy_positions):
-        """Create a threat map based on enemy positions."""
-        threat_map = {}
-        for x in range(0, SCREEN_WIDTH, GRID_SIZE):
-            for y in range(0, SCREEN_HEIGHT, GRID_SIZE):
-                threat = 0
-                for enemy_pos in enemy_positions:
-                    dx = x - enemy_pos[0]
-                    dy = y - enemy_pos[1]
-                    distance = math.sqrt(dx * dx + dy * dy)
-                    if distance > 0:
-                        threat += 1 / (distance * distance + 1)
-                threat_map[(x, y)] = threat
-        return threat_map
-
-    def _find_escape_direction(self, player_pos, enemy_positions, threat_map):
-        """Find the direction with the least resistance to escape."""
-        min_threat = float('inf')
-        escape_direction = (0, 0)
-        for angle in range(0, 360, 45):
-            rad = math.radians(angle)
-            dir_x = math.cos(rad)
-            dir_y = math.sin(rad)
-            threat = self._calculate_direction_threat(player_pos, dir_x, dir_y, threat_map)
-            if threat < min_threat:
-                min_threat = threat
-                escape_direction = (dir_x, dir_y)
-        return escape_direction
-
-    def _calculate_direction_threat(self, player_pos, dir_x, dir_y, threat_map):
-        """Calculate the threat in a given direction."""
-        threat = 0
-        for x, y in threat_map:
-            dx = x - player_pos[0]
-            dy = y - player_pos[1]
-            if dx * dir_x + dy * dir_y > 0:
-                threat += threat_map[(x, y)]
-        return threat
-
-    def _calculate_escape_path(self, player, enemies):
-        """Calculate the best escape path considering enemy movement prediction."""
-        best_path = None
-        max_safety = -float('inf')
-        
-        # 获取最近的几个敌人
-        nearby_enemies = sorted(enemies, key=lambda x: x["distance"])[:3]
-        if not nearby_enemies:
-            return None
+            enemy_objects = enemies
             
-        # 预测敌人的未来位置
-        predicted_positions = []
-        for enemy_info in nearby_enemies:
+        center_x = sum(e.x for e in enemy_objects) / len(enemy_objects)
+        center_y = sum(e.y for e in enemy_objects) / len(enemy_objects)
+        
+        # 计算从敌人群中心到玩家的方向
+        dx = player.x - center_x
+        dy = player.y - center_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > 0:
+            # 直接向远离敌人群的方向移动
+            escape_x = dx / dist
+            escape_y = dy / dist
+            
+            # 检查这个方向是否安全
+            safety = self._calculate_escape_safety(player, escape_x, escape_y, enemies, predicted_threats)
+            
+            # 如果这个方向不够安全，寻找次优方向
+            if safety < 0.5:
+                # 检查8个主要方向
+                best_safety = -float('inf')
+                best_dir = (escape_x, escape_y)
+                
+                for angle in range(0, 360, 45):
+                    rad = math.radians(angle)
+                    test_x = math.cos(rad)
+                    test_y = math.sin(rad)
+                    
+                    # 计算这个方向的安全性
+                    safety = self._calculate_escape_safety(player, test_x, test_y, enemies, predicted_threats)
+                    
+                    if safety > best_safety:
+                        best_safety = safety
+                        best_dir = (test_x, test_y)
+                
+                return best_dir
+            
+            return escape_x, escape_y
+        
+        # 如果无法计算方向，使用默认的逃生方向
+        return 1.0, 0.0  # 默认向右移动
+
+    def _calculate_breakthrough(self, player, enemies):
+        """Calculate the best direction to break through enemy lines."""
+        if not enemies:
+            return 0, 0
+        
+        # 获取最近的敌人
+        nearby_enemies = sorted(enemies, key=lambda x: x["distance"])[:5]
+        
+        # 计算敌人的包围中心点
+        center_x = sum(e["enemy"].x for e in nearby_enemies) / len(nearby_enemies)
+        center_y = sum(e["enemy"].y for e in nearby_enemies) / len(nearby_enemies)
+        
+        # 计算从玩家到包围中心的向量
+        dx = center_x - player.x
+        dy = center_y - player.y
+        
+        # 计算包围圈的平均半径
+        avg_radius = sum(e["distance"] for e in nearby_enemies) / len(nearby_enemies)
+        
+        # 如果包围圈太近，使用更激进的突围策略
+        if avg_radius < 200:  # 增加判定范围
+            # 获取最薄弱的方向
+            weak_direction = self._find_weakest_point(player, nearby_enemies)
+            
+            # 获取玩家当前位置
+            player_x, player_y = player.x, player.y
+            
+            # 计算突围方向
+            break_x, break_y = weak_direction
+            
+            # 根据玩家在角落的位置调整突围方向
+            if player_x < 150:  # 在左边缘
+                break_x = max(break_x, 0.5)  # 强制向右
+            elif player_x > SCREEN_WIDTH - 150:  # 在右边缘
+                break_x = min(break_x, -0.5)  # 强制向左
+                
+            if player_y < 150:  # 在上边缘
+                break_y = max(break_y, 0.5)  # 强制向下
+            elif player_y > SCREEN_HEIGHT - 150:  # 在下边缘
+                break_y = min(break_y, -0.5)  # 强制向上
+            
+            # 归一化突围向量
+            length = math.sqrt(break_x * break_x + break_y * break_y)
+            if length > 0:
+                return break_x / length, break_y / length
+        
+        # 如果不在紧急状态，选择远离包围中心的方向
+        length = math.sqrt(dx * dx + dy * dy)
+        if length > 0:
+            return -dx / length, -dy / length
+        
+        return 0, 0
+
+    def _find_weakest_point(self, player, enemies):
+        """Find the weakest point in the enemy formation to break through."""
+        if not enemies:
+            return 0, 0
+        
+        # 将周围空间分成16个扇区（更细致的分析）
+        sectors = [0] * 16
+        sector_angles = [i * 22.5 for i in range(16)]  # 360/16 = 22.5度
+        
+        # 计算每个扇区的敌人密度和威胁度
+        for enemy_info in enemies:
             enemy = enemy_info["enemy"]
-            # 计算敌人到玩家的方向
-            dx = player.x - enemy.x
-            dy = player.y - enemy.y
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            angle = math.degrees(math.atan2(dy, dx))
+            if angle < 0:
+                angle += 360
+            
+            # 确定敌人所在的扇区
+            sector = int(angle / 22.5) % 16
+            
+            # 根据敌人类型和距离计算威胁度
+            threat = 1.0
+            if enemy.kind == ENEMY_ELITE:
+                threat = 2.0
+            
+            # 距离越近威胁越大
             dist = math.sqrt(dx * dx + dy * dy)
             if dist > 0:
-                # 预测敌人未来位置（假设敌人会继续向玩家移动）
-                pred_x = enemy.x + (dx / dist) * 100  # 预测100单位距离
-                pred_y = enemy.y + (dy / dist) * 100
-                predicted_positions.append({
-                    "x": pred_x,
-                    "y": pred_y,
-                    "threat": enemy_info["threat_level"]
-                })
+                threat *= 1.0 / dist
+            
+            sectors[sector] += threat
         
-        # 检查16个可能的方向
+        # 找到威胁最小的扇区
+        min_threat = float('inf')
+        best_sector = 0
+        for i, threat in enumerate(sectors):
+            if threat < min_threat:
+                min_threat = threat
+                best_sector = i
+        
+        # 计算突围方向
+        angle = math.radians(sector_angles[best_sector])
+        return math.cos(angle), math.sin(angle)
+
+    def _predict_enemy_movements(self, player_pos, enemies):
+        """Predict future enemy positions and create a threat map."""
+        predicted_threats = {}
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = player_pos[0] - enemy.x
+            dy = player_pos[1] - enemy.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist > 0:
+                # 预测未来3个时间步的位置
+                for step in range(1, 4):
+                    pred_x = enemy.x + (dx / dist) * (50 * step)
+                    pred_y = enemy.y + (dy / dist) * (50 * step)
+                    
+                    # 将预测位置添加到威胁图中
+                    grid_x = (pred_x // GRID_SIZE) * GRID_SIZE
+                    grid_y = (pred_y // GRID_SIZE) * GRID_SIZE
+                    key = (grid_x, grid_y)
+                    
+                    if key not in predicted_threats:
+                        predicted_threats[key] = 0
+                    predicted_threats[key] += 1 / step  # 越远的预测威胁越小
+        
+        return predicted_threats
+
+    def _calculate_escape_safety(self, player, dir_x, dir_y, enemies, predicted_threats):
+        """计算逃生方向的安全性"""
+        safety = 1.0
+        check_distance = 200  # 检查距离
+        
+        # 检查当前威胁
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < check_distance:
+                # 计算移动方向与敌人方向的点积
+                dot_product = (dx * dir_x + dy * dir_y) / dist
+                
+                # 如果点积为正，说明移动方向朝向敌人
+                if dot_product > 0:
+                    # 距离越近，安全性越低
+                    safety -= (1 / dist) * (1 + dot_product) * 2  # 增加朝向敌人的惩罚
+                    
+                    # 精英敌人威胁更高
+                    if enemy.kind == ENEMY_ELITE:
+                        safety -= 1.0
+        
+        # 检查预测威胁
+        for threat in predicted_threats:
+            x, y = threat[0], threat[1]
+            dx = x - player.x
+            dy = y - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist < check_distance:
+                dot_product = (dx * dir_x + dy * dir_y) / dist
+                if dot_product > 0:
+                    safety -= (1 / dist) * (1 + dot_product) * threat[2] * 2  # 增加预测威胁的权重
+        
+        return max(0.0, safety)  # 确保安全性不会为负
+
+    def _find_safest_direction(self, player_pos, threat_map):
+        """寻找最安全的方向"""
+        best_safety = -float('inf')
+        best_dir = (1.0, 0.0)  # 默认向右移动
+        
+        # 检查16个方向
         for angle in range(0, 360, 23):
             rad = math.radians(angle)
             test_x = math.cos(rad)
             test_y = math.sin(rad)
             
             # 计算这个方向的安全性
-            safety = self._calculate_predicted_path_safety(player, test_x, test_y, predicted_positions)
+            safety = 0
+            for pos, threat in threat_map.items():
+                dx = pos[0] - player_pos[0]
+                dy = pos[1] - player_pos[1]
+                dist = math.sqrt(dx * dx + dy * dy)
+                
+                if dist > 0:
+                    # 计算移动方向与威胁方向的点积
+                    dot_product = (dx * test_x + dy * test_y) / dist
+                    
+                    # 如果点积为正，说明移动方向朝向威胁
+                    if dot_product > 0:
+                        safety -= threat * (1 + dot_product) / (dist * dist)
+                    else:
+                        # 如果点积为负，说明移动方向远离威胁，增加安全性
+                        safety += threat * (1 - dot_product) / (dist * dist)
             
-            if safety > max_safety:
-                max_safety = safety
-                best_path = (test_x, test_y)
+            if safety > best_safety:
+                best_safety = safety
+                best_dir = (test_x, test_y)
         
-        return best_path
+        return best_dir
 
-    def _calculate_direction_density(self, player, dir_x, dir_y, enemies):
-        """Calculate the density of enemies in a given direction."""
-        density = 0
-        for enemy_info in enemies:
+    def _predictive_dodge(self, player, enemies):
+        """Perform predictive dodging based on enemy movement patterns."""
+        if not enemies:
+            return 0, 0
+            
+        # 获取最近的敌人
+        nearest_enemies = sorted(enemies, key=lambda x: x["distance"])[:3]
+        
+        # 计算敌人的平均移动方向
+        avg_dx = 0
+        avg_dy = 0
+        for enemy_info in nearest_enemies:
             enemy = enemy_info["enemy"]
-            dx = enemy.x - player.x
-            dy = enemy.y - player.y
-            if (dx * dir_x + dy * dir_y) > 0:
-                density += 1
-        return density / len(enemies)
-
-    def _is_direction_safe(self, player, dir_x, dir_y, enemies):
-        """Check if a direction is safe based on enemy density."""
-        density = self._calculate_direction_density(player, dir_x, dir_y, enemies)
-        return density < 0.5
-
-    def _calculate_direction_danger(self, player, dir_x, dir_y, enemies):
-        """Calculate the danger of a direction based on enemy density."""
-        density = self._calculate_direction_density(player, dir_x, dir_y, enemies)
-        return 1.0 - density
+            dx = player.x - enemy.x
+            dy = player.y - enemy.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0:
+                avg_dx += dx / dist
+                avg_dy += dy / dist
+        
+        if len(nearest_enemies) > 0:
+            avg_dx /= len(nearest_enemies)
+            avg_dy /= len(nearest_enemies)
+            
+            # 计算垂直方向（躲避方向）
+            dodge_x = -avg_dy
+            dodge_y = avg_dx
+            
+            # 归一化
+            length = math.sqrt(dodge_x * dodge_x + dodge_y * dodge_y)
+            if length > 0:
+                dodge_x /= length
+                dodge_y /= length
+                
+            return dodge_x, dodge_y
+        
+        return 0, 0
 
     def get_kingbible_damage(self, level):
         """Calculate the damage for the 'KingBible' weapon based on its level."""
@@ -3256,20 +3390,49 @@ class Game(BaseGame):
             )
             self.next_id += 1
 
-    def _find_safest_direction(self, player_pos, threat_map):
-        """Find the safest direction for the agent to move based on the threat map."""
-        min_threat = float('inf')
-        safest_direction = (0, 0)
-        for x, y in threat_map:
-            dx = x - player_pos[0]
-            dy = y - player_pos[1]
-            distance = math.sqrt(dx * dx + dy * dy)
-            if distance > 0:
-                threat = threat_map[(x, y)]
-                if threat < min_threat:
-                    min_threat = threat
-                    safest_direction = (dx / distance, dy / distance)
-        return safest_direction
+    def _create_threat_map(self, player, enemies, predicted_threats):
+        """创建威胁地图"""
+        threat_map = {}
+        grid_size = 50  # 网格大小
+        
+        # 初始化网格
+        for x in range(-SCREEN_WIDTH//2, SCREEN_WIDTH//2, grid_size):
+            for y in range(-SCREEN_HEIGHT//2, SCREEN_HEIGHT//2, grid_size):
+                threat_map[(x, y)] = 0
+        
+        # 计算当前威胁
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            threat = enemy_info["threat"]
+            grid_x = (enemy.x // grid_size) * grid_size
+            grid_y = (enemy.y // grid_size) * grid_size
+            
+            # 增加威胁扩散范围
+            for dx in range(-2, 3):
+                for dy in range(-2, 3):
+                    pos_x = grid_x + dx * grid_size
+                    pos_y = grid_y + dy * grid_size
+                    if (pos_x, pos_y) in threat_map:
+                        # 根据距离衰减威胁值
+                        dist = math.sqrt(dx * dx + dy * dy)
+                        threat_map[(pos_x, pos_y)] += threat / (1 + dist)
+        
+        # 计算预测威胁
+        for threat in predicted_threats:
+            x, y = threat[0], threat[1]
+            grid_x = (x // grid_size) * grid_size
+            grid_y = (y // grid_size) * grid_size
+            
+            # 增加预测威胁的扩散范围
+            for dx in range(-1, 2):
+                for dy in range(-1, 2):
+                    pos_x = grid_x + dx * grid_size
+                    pos_y = grid_y + dy * grid_size
+                    if (pos_x, pos_y) in threat_map:
+                        dist = math.sqrt(dx * dx + dy * dy)
+                        threat_map[(pos_x, pos_y)] += threat[2] / (1 + dist)
+        
+        return threat_map
 
     def _movement_to_actions(self, move_x, move_y):
         """Convert movement vector to action inputs."""
@@ -3433,8 +3596,13 @@ class Game(BaseGame):
         # 检查是否在角落区域且被敌人包围
         if (is_left or is_right) and (is_top or is_bottom):
             # 获取附近的敌人
-            nearby_enemies = [e for e in self.get_particles(ENEMY) if 
-                abs(e.x - player.x) < 200 and abs(e.y - player.y) < 200]
+            nearby_enemies = []
+            for enemy in self.get_particles(ENEMY) + self.get_particles(ENEMY_ELITE):
+                dx = enemy.x - player.x
+                dy = enemy.y - player.y
+                distance = math.sqrt(dx * dx + dy * dy)
+                if distance < 200:
+                    nearby_enemies.append(enemy)
             
             # 如果附近有敌人，认为处于危险角落
             return len(nearby_enemies) > 0
@@ -3443,9 +3611,6 @@ class Game(BaseGame):
 
     def _calculate_emergency_escape(self, player, enemies, predicted_threats):
         """Calculate the best emergency escape route."""
-        best_path = None
-        max_safety = -float('inf')
-        
         # 检查是否在角落
         is_in_corner = self._is_in_corner(player)
         
@@ -3453,20 +3618,52 @@ class Game(BaseGame):
         if is_in_corner:
             return self._calculate_breakthrough(player, enemies)
         
-        # 检查16个可能的方向
-        for angle in range(0, 360, 23):
-            rad = math.radians(angle)
-            test_x = math.cos(rad)
-            test_y = math.sin(rad)
+        # 计算敌人群的中心点
+        if isinstance(enemies[0], dict):
+            enemy_objects = [e["enemy"] for e in enemies]
+        else:
+            enemy_objects = enemies
             
-            # 计算这个方向的安全性
-            safety = self._calculate_escape_safety(player, test_x, test_y, enemies, predicted_threats)
-            
-            if safety > max_safety:
-                max_safety = safety
-                best_path = (test_x, test_y)
+        center_x = sum(e.x for e in enemy_objects) / len(enemy_objects)
+        center_y = sum(e.y for e in enemy_objects) / len(enemy_objects)
         
-        return best_path
+        # 计算从敌人群中心到玩家的方向
+        dx = player.x - center_x
+        dy = player.y - center_y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > 0:
+            # 直接向远离敌人群的方向移动
+            escape_x = dx / dist
+            escape_y = dy / dist
+            
+            # 检查这个方向是否安全
+            safety = self._calculate_escape_safety(player, escape_x, escape_y, enemies, predicted_threats)
+            
+            # 如果这个方向不够安全，寻找次优方向
+            if safety < 0.5:
+                # 检查8个主要方向
+                best_safety = -float('inf')
+                best_dir = (escape_x, escape_y)
+                
+                for angle in range(0, 360, 45):
+                    rad = math.radians(angle)
+                    test_x = math.cos(rad)
+                    test_y = math.sin(rad)
+                    
+                    # 计算这个方向的安全性
+                    safety = self._calculate_escape_safety(player, test_x, test_y, enemies, predicted_threats)
+                    
+                    if safety > best_safety:
+                        best_safety = safety
+                        best_dir = (test_x, test_y)
+                
+                return best_dir
+            
+            return escape_x, escape_y
+        
+        # 如果无法计算方向，使用默认的逃生方向
+        return 1.0, 0.0  # 默认向右移动
 
     def _calculate_breakthrough(self, player, enemies):
         """Calculate the best direction to break through enemy lines."""
@@ -3659,3 +3856,335 @@ class Game(BaseGame):
             return dodge_x, dodge_y
         
         return 0, 0
+
+    def _find_nearest_xp(self, player):
+        """Find the nearest XP particle to the player."""
+        nearest_xp = None
+        min_distance = float('inf')
+        for xp in self.get_particles(XP):
+            dx = player.x - xp.x
+            dy = player.y - xp.y
+            distance = math.sqrt(dx * dx + dy * dy)
+            if distance < min_distance:
+                min_distance = distance
+                nearest_xp = xp
+        return nearest_xp
+
+    def _check_surrounded(self, enemies):
+        """Check if the player is surrounded by enemies."""
+        if not enemies:
+            return False
+        
+        # 如果enemies是字典列表，提取enemy对象
+        if isinstance(enemies[0], dict):
+            enemies = [enemy_info["enemy"] for enemy_info in enemies]
+        
+        # Calculate the center of the enemy formation
+        center_x = sum(enemy.x for enemy in enemies) / len(enemies)
+        center_y = sum(enemy.y for enemy in enemies) / len(enemies)
+        
+        # Calculate the distance to the nearest enemy
+        min_distance = float('inf')
+        for enemy in enemies:
+            dx = enemy.x - center_x
+            dy = enemy.y - center_y
+            distance = math.sqrt(dx * dx + dy * dy)
+            if distance < min_distance:
+                min_distance = distance
+        
+        # Check if the player is within the radius of the enemy formation
+        if min_distance < 150:
+            return True
+        
+        return False
+
+    def _calculate_grid_score(self, player, center_x, center_y, enemies, grid_width, grid_height):
+        """Calculate the grid score based on the distribution of enemies."""
+        score = 0
+        for enemy_info in enemies:
+            dx = enemy_info["enemy"].x - center_x
+            dy = enemy_info["enemy"].y - center_y
+            distance = math.sqrt(dx * dx + dy * dy)
+            if distance < 150:
+                score += 1
+        return score / (grid_width * grid_height)
+
+    def _calculate_movement(self, player, game_state, last_action):
+        """计算智能体的移动方向"""
+        # 保存游戏状态供其他方法使用
+        self.current_game_state = game_state
+        
+        # 获取游戏状态信息
+        enemies = game_state["enemies"]
+        is_surrounded = game_state["is_surrounded"]
+        is_corner = game_state["is_corner"]
+        nearest_xp = game_state["nearest_xp"]
+        health_percentage = game_state["health_percentage"]
+        
+        # 检查是否在地图边缘
+        is_at_edge = self._is_at_map_edge(player)
+        
+        # 预测敌人移动（限制预测的敌人数量）
+        nearby_enemies = enemies[:30]  # 只预测最近的30个敌人
+        predicted_threats = self._predict_enemy_movements((player.x, player.y), nearby_enemies)
+        
+        # 检查危险状态
+        is_danger = self._check_danger_state(player, enemies)
+        
+        # 分析当前象限的敌人密度
+        current_quadrant = self._get_quadrant(player.x, player.y)
+        quadrant_density = self._calculate_quadrant_density(current_quadrant, enemies)
+        
+        # 计算新的移动方向
+        new_move_x, new_move_y = 0, 0
+        
+        # 如果在地图边缘且被包围，尝试突破
+        if is_at_edge and is_surrounded:
+            new_move_x, new_move_y = self._calculate_breakthrough(player, enemies)
+        # 如果处于危险状态，计算紧急逃生路线
+        elif is_danger:
+            new_move_x, new_move_y = self._calculate_emergency_escape(player, enemies, predicted_threats)
+        # 如果被包围，尝试预测性躲避
+        elif is_surrounded:
+            new_move_x, new_move_y = self._predictive_dodge(player, enemies)
+        # 如果当前象限敌人密度高，寻找更安全的象限
+        elif quadrant_density > 0.3:
+            new_move_x, new_move_y = self._move_to_safer_quadrant(player, enemies)
+        # 如果安全且附近有XP，且当前象限敌人密度低，才考虑收集
+        elif nearest_xp and self._is_safe_to_collect_xp(player, game_state) and quadrant_density < 0.2:
+            dx = nearest_xp.x - player.x
+            dy = nearest_xp.y - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0 and dist < 100:
+                new_move_x, new_move_y = dx / dist, dy / dist
+        # 默认情况下，寻找最安全的方向
+        else:
+            threat_map = self._create_threat_map(player, enemies, predicted_threats)
+            new_move_x, new_move_y = self._find_safest_direction((player.x, player.y), threat_map)
+        
+        # 调整边缘移动
+        new_move_x, new_move_y = self._adjust_edge_movement(player, new_move_x, new_move_y)
+        
+        # 检查并避免与敌人的碰撞
+        new_move_x, new_move_y = self._avoid_collisions(player, new_move_x, new_move_y, enemies)
+        
+        # 应用平滑移动
+        final_move_x, final_move_y = self._smooth_movement(new_move_x, new_move_y)
+        
+        # 更新上一次的移动方向
+        self.last_move_x = final_move_x
+        self.last_move_y = final_move_y
+        
+        return final_move_x, final_move_y
+
+    def _get_quadrant(self, x, y):
+        """获取坐标所在的象限"""
+        mid_x = SCREEN_WIDTH / 2
+        mid_y = SCREEN_HEIGHT / 2
+        if x < mid_x:
+            if y < mid_y:
+                return 0  # 左上
+            else:
+                return 2  # 左下
+        else:
+            if y < mid_y:
+                return 1  # 右上
+            else:
+                return 3  # 右下
+
+    def _calculate_quadrant_density(self, quadrant, enemies):
+        """计算象限的敌人密度"""
+        if not enemies:
+            return 0.0
+            
+        quadrant_enemies = 0
+        total_enemies = len(enemies)
+        
+        # 限制检查的敌人数量，避免性能问题
+        for enemy_info in enemies[:50]:  # 只检查最近的50个敌人
+            enemy = enemy_info["enemy"]
+            if self._get_quadrant(enemy.x, enemy.y) == quadrant:
+                quadrant_enemies += 1
+                
+        return quadrant_enemies / min(total_enemies, 50)  # 使用较小的分母
+
+    def _move_to_safer_quadrant(self, player, enemies):
+        """移动到更安全的象限"""
+        current_quadrant = self._get_quadrant(player.x, player.y)
+        quadrant_densities = [0.0] * 4
+        quadrant_centers = self._calculate_quadrant_centers()
+        
+        # 限制检查的敌人数量
+        nearby_enemies = enemies[:50]  # 只考虑最近的50个敌人
+        
+        # 计算每个象限的敌人密度
+        for enemy_info in nearby_enemies:
+            enemy = enemy_info["enemy"]
+            quadrant = self._get_quadrant(enemy.x, enemy.y)
+            quadrant_densities[quadrant] += 1
+            
+        # 找到最安全的象限
+        best_score = float('inf')
+        target_quadrant = current_quadrant
+        
+        for i, density in enumerate(quadrant_densities):
+            if i == current_quadrant:
+                continue
+                
+            # 计算到象限中心的距离
+            center_x, center_y = quadrant_centers[i]
+            dx = center_x - player.x
+            dy = center_y - player.y
+            dist_to_center = math.sqrt(dx * dx + dy * dy)
+            
+            # 计算象限得分（密度越低越好，距离越近越好）
+            score = density * 2 + dist_to_center / 1000
+            
+            if score < best_score:
+                best_score = score
+                target_quadrant = i
+        
+        # 计算目标象限的中心点
+        target_x, target_y = quadrant_centers[target_quadrant]
+        
+        # 计算移动方向
+        dx = target_x - player.x
+        dy = target_y - player.y
+        dist = math.sqrt(dx * dx + dy * dy)
+        
+        if dist > 0:
+            return dx / dist, dy / dist
+            
+        return 0, 0
+
+    def _calculate_quadrant_centers(self):
+        """计算每个象限的中心点"""
+        mid_x = SCREEN_WIDTH / 2
+        mid_y = SCREEN_HEIGHT / 2
+        margin = 100  # 距离边缘的安全距离
+        
+        return [
+            (mid_x - margin, mid_y - margin),  # 左上
+            (mid_x + margin, mid_y - margin),  # 右上
+            (mid_x - margin, mid_y + margin),  # 左下
+            (mid_x + margin, mid_y + margin)   # 右下
+        ]
+
+    def _adjust_edge_movement(self, player, move_x, move_y):
+        """调整边缘移动，避免不必要地靠近边缘"""
+        # 计算到地图中心的距离
+        center_x = SCREEN_WIDTH / 2
+        center_y = SCREEN_HEIGHT / 2
+        dx_to_center = center_x - player.x
+        dy_to_center = center_y - player.y
+        dist_to_center = math.sqrt(dx_to_center * dx_to_center + dy_to_center * dy_to_center)
+        
+        # 如果在地图边缘且不是紧急情况，向中心移动
+        if self._is_at_map_edge(player) and not self._is_emergency_situation():
+            if dist_to_center > 0:
+                return dx_to_center / dist_to_center, dy_to_center / dist_to_center
+        
+        # 计算到边缘的距离
+        edge_margin = 100  # 边缘安全距离
+        dist_to_left = player.x
+        dist_to_right = SCREEN_WIDTH - player.x
+        dist_to_top = player.y
+        dist_to_bottom = SCREEN_HEIGHT - player.y
+        
+        # 如果太靠近边缘，调整移动方向
+        if dist_to_left < edge_margin and move_x < 0:
+            move_x = 0.5  # 向右移动
+        elif dist_to_right < edge_margin and move_x > 0:
+            move_x = -0.5  # 向左移动
+        if dist_to_top < edge_margin and move_y < 0:
+            move_y = 0.5  # 向下移动
+        elif dist_to_bottom < edge_margin and move_y > 0:
+            move_y = -0.5  # 向上移动
+            
+        return move_x, move_y
+
+    def _is_emergency_situation(self):
+        """检查是否处于紧急情况（需要靠近边缘）"""
+        # 使用当前游戏状态而不是类属性
+        return (self.current_game_state.get("is_surrounded", False) or 
+                self.current_game_state.get("is_danger", False) or 
+                self.current_game_state.get("is_corner", False) or 
+                self.current_game_state.get("health_percentage", 1.0) < 0.3)
+
+    def _avoid_collisions(self, player, move_x, move_y, enemies):
+        """避免与敌人的碰撞"""
+        if not enemies:
+            return move_x, move_y
+            
+        # 检查每个敌人
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            # 如果距离太近，需要躲避
+            if dist < 50:  # 碰撞避免距离
+                # 计算逃离方向
+                if dist > 0:  # 确保不会除以零
+                    escape_x = -dx / dist
+                    escape_y = -dy / dist
+                    
+                    # 计算当前移动方向与逃离方向的点积
+                    dot_product = move_x * escape_x + move_y * escape_y
+                    
+                    # 如果当前移动方向与逃离方向相反，调整移动方向
+                    if dot_product < 0:
+                        # 使用逃离方向替代当前移动方向
+                        move_x = escape_x
+                        move_y = escape_y
+                    else:
+                        # 在当前移动方向的基础上添加逃离分量
+                        move_x = move_x * 0.7 + escape_x * 0.3
+                        move_y = move_y * 0.7 + escape_y * 0.3
+                        
+                        # 归一化方向向量
+                        length = math.sqrt(move_x * move_x + move_y * move_y)
+                        if length > 0:
+                            move_x /= length
+                            move_y /= length
+                else:
+                    # 如果距离为0，随机选择一个方向
+                    angle = random.uniform(0, 2 * math.pi)
+                    move_x = math.cos(angle)
+                    move_y = math.sin(angle)
+        
+        return move_x, move_y
+
+    def _is_at_map_edge(self, player):
+        """检查是否在地图边缘"""
+        edge_margin = 100  # 边缘判定距离
+        return (
+            player.x < edge_margin or 
+            player.x > SCREEN_WIDTH - edge_margin or 
+            player.y < edge_margin or 
+            player.y > SCREEN_HEIGHT - edge_margin
+        )
+
+    def _smooth_movement(self, new_x, new_y):
+        """平滑移动方向"""
+        # 计算新方向与旧方向的点积
+        dot_product = new_x * self.last_move_x + new_y * self.last_move_y
+        
+        # 如果方向变化太大，使用平滑过渡
+        if dot_product < self.direction_change_threshold:
+            # 使用平滑因子进行插值
+            final_x = self.last_move_x * self.smoothing_factor + new_x * (1 - self.smoothing_factor)
+            final_y = self.last_move_y * self.smoothing_factor + new_y * (1 - self.smoothing_factor)
+        else:
+            # 方向变化不大，直接使用新方向
+            final_x = new_x
+            final_y = new_y
+        
+        # 归一化最终方向
+        length = math.sqrt(final_x * final_x + final_y * final_y)
+        if length > 0:
+            final_x /= length
+            final_y /= length
+        
+        return final_x, final_y

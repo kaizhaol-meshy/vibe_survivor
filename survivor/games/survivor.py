@@ -40,7 +40,7 @@ PLAYER_SPEED = 5
 ENEMY_SPEED_MIN = 2
 ENEMY_SPEED_MAX = 3
 ELITE_SPEED_MULTIPLIER = 1.2  # Elite enemies move faster
-ENEMY_SPEED_REDUCTION = 0.7  # 全局敌人速度减速系数
+ENEMY_SPEED_REDUCTION = 0.5  # 全局敌人速度减速系数
 WEAPON_SPEED = 8
 MAX_ENEMIES = 50  # 优化：减少最大敌人数
 MAX_WEAPONS = 4   # 优化：减少最大武器数
@@ -1040,7 +1040,7 @@ class Game(BaseGame):
         return (x >= rect_x and x <= rect_x + rect_width and
                 y >= rect_y and y <= rect_y + rect_height)
     
-    def check_collision(self, particle1, particle2, size1, size2):
+    def check_collision(self, particle1, particle2, size1=None, size2=None):
         """Check if two particles are colliding"""
     
         # 优化：只检测屏幕内的粒子
@@ -1094,7 +1094,6 @@ class Game(BaseGame):
         distance = math.sqrt(dx * dx + dy * dy)
         collision = distance < (size1 + size2) / 2
         
-       
         return collision
     
     def show_upgrade_menu(self):
@@ -2920,160 +2919,479 @@ class Game(BaseGame):
 
     def agent_action(self, last_action=None):
         """
-        AI agent that tries to avoid enemies and collect XP
+        AI agent that mimics human player behavior in a Vampire Survivors-like game.
+        Prioritizes survival while maintaining smooth movement and strategic XP collection.
         """
-        # In non-playing states, we need to simulate mouse/click actions
+        # Handle menu states
         if self.game_state != STATE_PLAYING:
-            # Simulate clicks in different menu states
-            if self.game_state == STATE_START_MENU:
-                # Click the start button
-                button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
-                button_y = SCREEN_HEIGHT // 2 - 30
-                self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
-                return [False, False, False, False, False]
-            
-            elif self.game_state == STATE_UPGRADE_MENU:
-                # Select a random upgrade option
-                if self.upgrade_options:
-                    option_index = random.randint(0, len(self.upgrade_options) - 1)
-                    button_y = SCREEN_HEIGHT // 2 - 50 + option_index * (BUTTON_HEIGHT + 20)
-                    mouse_pos = (SCREEN_WIDTH // 2, button_y + BUTTON_HEIGHT // 2)
-                    self.handle_input(None, mouse_pos, True)
-                return [False, False, False, False, False]
-                
-            elif self.game_state == STATE_GAME_OVER:
-                # Click the restart button
-                button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
-                button_y = SCREEN_HEIGHT // 2 - 30
-                self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
-                return [False, False, False, False, False]
-        
-        # Normal playing state AI
+            return self._handle_menu_states()
+
+        # Get player and health info
         player = self.get_particle(PLAYER)
         if not player:
             return [False, False, False, False, False]
+            
+        # Get current health percentage
+        health_percentage = 1.0
+        if player.health_system:
+            health_percentage = player.health_system.current_hp / player.health_system.max_hp
 
-        # 获取玩家当前生命值
-        player_hp = player.health_system.current_hp if player.health_system else 100
-        max_hp = player.health_system.max_hp if player.health_system else 100
-        hp_percent = player_hp / max_hp
+        # Analyze game state
+        game_state = self._analyze_game_state(player, health_percentage)
+        
+        # Calculate movement direction based on game state
+        move_x, move_y = self._calculate_movement(player, game_state, last_action)
+        
+        # Convert movement to actions
+        return self._movement_to_actions(move_x, move_y)
 
-        # 收集所有敌人和XP的信息
+    def _handle_menu_states(self):
+        """Handle different menu states with appropriate actions."""
+        if self.game_state == STATE_START_MENU:
+            button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+            button_y = SCREEN_HEIGHT // 2 - 30
+            self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
+            return [False, False, False, False, False]
+        elif self.game_state == STATE_UPGRADE_MENU:
+            if self.upgrade_options:
+                upgrade_index = random.randint(0, len(self.upgrade_options) - 1)
+                cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
+                button_y = cy - 50 + upgrade_index * (BUTTON_HEIGHT + 20)
+                button_x = cx - BUTTON_WIDTH // 2
+                self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
+            return [False, False, False, False, False]
+        elif self.game_state == STATE_GAME_OVER:
+            button_x = SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2
+            button_y = SCREEN_HEIGHT // 2 - 30
+            self.handle_input(None, (button_x + BUTTON_WIDTH//2, button_y + BUTTON_HEIGHT//2), True)
+            return [False, False, False, False, False]
+        return [False, False, False, False, False]
+
+    def _analyze_game_state(self, player, health_percentage):
+        """Analyze the current game state."""
+        # 获取所有敌人
         enemies = []
-        for enemy_type in [ENEMY, ENEMY_ELITE]:
-            for enemy in self.get_particles(enemy_type):
-                dx = player.x - enemy.x
-                dy = player.y - enemy.y
-                dist = math.sqrt(dx * dx + dy * dy)
-                # 计算敌人的威胁度（精英敌人威胁更大）
-                threat = 2.0 if enemy_type == ENEMY_ELITE else 1.0
-                enemies.append({
-                    'enemy': enemy,
-                    'dist': dist,
-                    'dx': dx,
-                    'dy': dy,
-                    'threat': threat
-                })
+        nearest_enemy = None
+        min_distance = float('inf')
+        
+        for enemy in self.get_particles(ENEMY):
+            dx = player.x - enemy.x
+            dy = player.y - enemy.y
+            distance = math.sqrt(dx * dx + dy * dy)
+            
+            # 计算威胁等级
+            threat_level = self._calculate_threat_level(enemy, distance, health_percentage)
+            
+            # 预测敌人位置
+            pred_x, pred_y = self._predict_enemy_position(enemy, dx, dy, distance)
+            
+            enemy_info = {
+                "enemy": enemy,
+                "distance": distance,
+                "threat_level": threat_level,
+                "predicted_x": pred_x,
+                "predicted_y": pred_y
+            }
+            enemies.append(enemy_info)
+            
+            # 更新最近敌人
+            if distance < min_distance:
+                min_distance = distance
+                nearest_enemy = enemy_info
+        
+        # 检查是否被包围
+        is_surrounded = self._check_surrounded(enemies)
+        
+        # 获取最近的经验值
+        nearest_xp = self._find_nearest_xp(player)
+        
+        return {
+            "enemies": enemies,
+            "is_surrounded": is_surrounded,
+            "nearest_xp": nearest_xp,
+            "health_percentage": health_percentage,
+            "player": player,
+            "nearest_enemy": nearest_enemy
+        }
 
-        # 按距离排序敌人
-        enemies.sort(key=lambda x: x['dist'])
+    def _calculate_threat_level(self, enemy, distance, health_percentage):
+        """Calculate threat level for an enemy based on various factors."""
+        threat_level = 2.0 if enemy.kind == ENEMY_ELITE else 1.0
+        
+        # Adjust threat based on distance
+        if distance < 100:
+            threat_level *= 2.0
+        elif distance < 200:
+            threat_level *= 1.5
+            
+        # Adjust threat based on health
+        if health_percentage < 0.3:
+            threat_level *= 1.5
+            
+        return threat_level
 
-        # 收集所有XP的信息
-        xp_particles = []
-        for xp in self.get_particles(XP):
-            dx = player.x - xp.x
-            dy = player.y - xp.y
+    def _predict_enemy_position(self, enemy, dx, dy, distance):
+        """Predict enemy's position after a short time."""
+        if distance == 0:
+            return (enemy.x, enemy.y)
+            
+        enemy_speed = enemy.attributes.get("speed", ENEMY_SPEED_MIN)
+        prediction_frames = 10  # Predict 10 frames ahead
+        
+        predicted_x = enemy.x + (dx / distance) * enemy_speed * prediction_frames
+        predicted_y = enemy.y + (dy / distance) * enemy_speed * prediction_frames
+        
+        return (predicted_x, predicted_y)
+
+    def _check_surrounded(self, enemies):
+        """Check if player is surrounded by enemies."""
+        if not enemies:
+            return False
+            
+        # 计算敌人分布
+        angles = []
+        for enemy_info in enemies:
+            if enemy_info["distance"] > 300:  # 只考虑较近的敌人
+                continue
+                
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - self.get_particle(PLAYER).x
+            dy = enemy.y - self.get_particle(PLAYER).y
+            angle = math.degrees(math.atan2(dy, dx))
+            angles.append(angle)
+        
+        if len(angles) < 3:  # 至少需要3个敌人才能形成包围
+            return False
+            
+        # 检查角度分布
+        angles.sort()
+        max_gap = 0
+        for i in range(len(angles)):
+            gap = (angles[(i + 1) % len(angles)] - angles[i]) % 360
+            max_gap = max(max_gap, gap)
+            
+        # 如果最大间隙小于120度，认为被包围
+        return max_gap < 120
+
+    def _find_nearest_xp(self, player):
+        """Find the nearest XP particle if it's safe to collect."""
+        xp_particles = self.get_particles(XP)
+        if not xp_particles:
+            return None
+            
+        nearest_xp = min(xp_particles, key=lambda xp: 
+            (player.x - xp.x) ** 2 + (player.y - xp.y) ** 2)
+            
+        xp_dx = nearest_xp.x - player.x
+        xp_dy = nearest_xp.y - player.y
+        xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
+        
+        if xp_dist < 200:  # Only consider close XP
+            return {
+                "xp": nearest_xp,
+                "dx": xp_dx,
+                "dy": xp_dy,
+                "distance": xp_dist
+            }
+        return None
+
+    def _calculate_movement(self, player, game_state, last_action):
+        """Calculate the movement direction for the agent."""
+        # 感知系统：获取玩家和敌人位置
+        player_pos = (player.x, player.y)
+        enemy_positions = [(enemy_info["enemy"].x, enemy_info["enemy"].y) for enemy_info in game_state["enemies"]]
+        
+        # 威胁评估：创建敌人密度图
+        threat_map = self._create_threat_map(player_pos, enemy_positions)
+        
+        # 检查是否被包围
+        if game_state["is_surrounded"]:
+            # 逃脱机制：寻找最弱围堵点
+            escape_direction = self._find_escape_direction(player_pos, enemy_positions, threat_map)
+            move_x, move_y = escape_direction
+        else:
+            # 在安全区域内，选择最近经验球所在方向
+            nearest_xp = self._find_nearest_xp(player)
+            if nearest_xp and self._is_safe_to_collect_xp(player, game_state):
+                xp_dx = nearest_xp.x - player.x
+                xp_dy = nearest_xp.y - player.y
+                xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
+                if xp_dist > 0:
+                    move_x = xp_dx / xp_dist
+                    move_y = xp_dy / xp_dist
+            else:
+                # 选择威胁最小的方向
+                move_x, move_y = self._find_safest_direction(player_pos, threat_map)
+        
+        # 移动平滑策略
+        if last_action:
+            move_x, move_y = self._smooth_movement(move_x, move_y, last_action)
+        
+        return move_x, move_y
+
+    def _create_threat_map(self, player_pos, enemy_positions):
+        """Create a threat map based on enemy positions."""
+        threat_map = {}
+        for x in range(0, SCREEN_WIDTH, GRID_SIZE):
+            for y in range(0, SCREEN_HEIGHT, GRID_SIZE):
+                threat = 0
+                for enemy_pos in enemy_positions:
+                    dx = x - enemy_pos[0]
+                    dy = y - enemy_pos[1]
+                    distance = math.sqrt(dx * dx + dy * dy)
+                    if distance > 0:
+                        threat += 1 / (distance * distance + 1)
+                threat_map[(x, y)] = threat
+        return threat_map
+
+    def _find_escape_direction(self, player_pos, enemy_positions, threat_map):
+        """Find the direction with the least resistance to escape."""
+        min_threat = float('inf')
+        escape_direction = (0, 0)
+        for angle in range(0, 360, 45):
+            rad = math.radians(angle)
+            dir_x = math.cos(rad)
+            dir_y = math.sin(rad)
+            threat = self._calculate_direction_threat(player_pos, dir_x, dir_y, threat_map)
+            if threat < min_threat:
+                min_threat = threat
+                escape_direction = (dir_x, dir_y)
+        return escape_direction
+
+    def _calculate_direction_threat(self, player_pos, dir_x, dir_y, threat_map):
+        """Calculate the threat in a given direction."""
+        threat = 0
+        for x, y in threat_map:
+            dx = x - player_pos[0]
+            dy = y - player_pos[1]
+            if dx * dir_x + dy * dir_y > 0:
+                threat += threat_map[(x, y)]
+        return threat
+
+    def _calculate_escape_path(self, player, enemies):
+        """Calculate the best escape path considering enemy movement prediction."""
+        best_path = None
+        max_safety = -float('inf')
+        
+        # 获取最近的几个敌人
+        nearby_enemies = sorted(enemies, key=lambda x: x["distance"])[:3]
+        if not nearby_enemies:
+            return None
+            
+        # 预测敌人的未来位置
+        predicted_positions = []
+        for enemy_info in nearby_enemies:
+            enemy = enemy_info["enemy"]
+            # 计算敌人到玩家的方向
+            dx = player.x - enemy.x
+            dy = player.y - enemy.y
             dist = math.sqrt(dx * dx + dy * dy)
-            xp_particles.append({
-                'xp': xp,
-                'dist': dist,
-                'dx': dx,
-                'dy': dy
-            })
+            if dist > 0:
+                # 预测敌人未来位置（假设敌人会继续向玩家移动）
+                pred_x = enemy.x + (dx / dist) * 100  # 预测100单位距离
+                pred_y = enemy.y + (dy / dist) * 100
+                predicted_positions.append({
+                    "x": pred_x,
+                    "y": pred_y,
+                    "threat": enemy_info["threat_level"]
+                })
+        
+        # 检查16个可能的方向
+        for angle in range(0, 360, 23):
+            rad = math.radians(angle)
+            test_x = math.cos(rad)
+            test_y = math.sin(rad)
+            
+            # 计算这个方向的安全性
+            safety = self._calculate_predicted_path_safety(player, test_x, test_y, predicted_positions)
+            
+            if safety > max_safety:
+                max_safety = safety
+                best_path = (test_x, test_y)
+        
+        return best_path
 
-        # 按距离排序XP
-        xp_particles.sort(key=lambda x: x['dist'])
+    def _calculate_direction_density(self, player, dir_x, dir_y, enemies):
+        """Calculate the density of enemies in a given direction."""
+        density = 0
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            if (dx * dir_x + dy * dir_y) > 0:
+                density += 1
+        return density / len(enemies)
 
-        # 计算移动方向
-        move_x = 0
-        move_y = 0
+    def _is_direction_safe(self, player, dir_x, dir_y, enemies):
+        """Check if a direction is safe based on enemy density."""
+        density = self._calculate_direction_density(player, dir_x, dir_y, enemies)
+        return density < 0.5
 
-        # 1. 处理敌人威胁
-        if enemies:
-            # 计算所有敌人的威胁向量
-            threat_x = 0
-            threat_y = 0
-            total_threat = 0
+    def _calculate_direction_danger(self, player, dir_x, dir_y, enemies):
+        """Calculate the danger of a direction based on enemy density."""
+        density = self._calculate_direction_density(player, dir_x, dir_y, enemies)
+        return 1.0 - density
 
-            # 考虑最近的3个敌人
-            for enemy_info in enemies[:3]:
-                # 根据距离计算威胁权重（越近威胁越大）
-                weight = enemy_info['threat'] / (enemy_info['dist'] + 1)
-                # 根据生命值调整威胁权重（生命值越低越谨慎）
-                if hp_percent < 0.3:  # 生命值低于30%时更谨慎
-                    weight *= 2
-                threat_x += enemy_info['dx'] * weight
-                threat_y += enemy_info['dy'] * weight
-                total_threat += weight
+    def get_kingbible_damage(self, level):
+        """Calculate the damage for the 'KingBible' weapon based on its level."""
+        if level <= 3:
+            return 10
+        elif level <= 6:
+            return 20
+        else:
+            return 30
 
-            if total_threat > 0:
-                # 归一化威胁向量
-                threat_x /= total_threat
-                threat_y /= total_threat
-                # 将威胁向量转换为移动方向（远离威胁）
-                move_x -= threat_x
-                move_y -= threat_y
+    def check_enemy_collision(self, enemy1, enemy2):
+        """Check for collisions between two enemy particles."""
+        # 获取敌人尺寸
+        size1 = ELITE_SIZE if enemy1.kind == ENEMY_ELITE else ENEMY_SIZE
+        size2 = ELITE_SIZE if enemy2.kind == ENEMY_ELITE else ENEMY_SIZE
+        
+        # 计算两个敌人之间的距离
+        dx = enemy2.x - enemy1.x
+        dy = enemy2.y - enemy1.y
+        distance = math.sqrt(dx * dx + dy * dy)
+        
+        # 计算排斥范围（1.5倍敌人尺寸）
+        repulsion_range = (size1 + size2) * 1.2
+        
+        # 如果距离小于排斥范围，返回排斥信息
+        return distance < repulsion_range, dx, dy, distance
 
-        # 2. 处理XP收集
-        if xp_particles and (not enemies or enemies[0]['dist'] > 150):  # 只在安全时收集XP
-            nearest_xp = xp_particles[0]
-            # 计算到最近XP的方向
-            xp_dir_x = -nearest_xp['dx']
-            xp_dir_y = -nearest_xp['dy']
-            # 归一化方向向量
-            xp_dist = math.sqrt(xp_dir_x * xp_dir_x + xp_dir_y * xp_dir_y)
-            if xp_dist > 0:
-                xp_dir_x /= xp_dist
-                xp_dir_y /= xp_dist
-                # 将XP收集方向添加到移动方向
-                move_x += xp_dir_x * 0.5  # 降低XP收集的优先级
-                move_y += xp_dir_y * 0.5
+    def spawn_blood_effect(self, x, y):
+        """Generate blood effects at the specified position."""
+        # 限制同时存在的血液粒子数量
+        blood_particles = [p for p in self.particles if p.kind == BLOOD]
+        if len(blood_particles) >= MAX_BLOOD_PARTICLES:
+            return
+            
+        # 计算可以生成的新粒子数量
+        available_slots = MAX_BLOOD_PARTICLES - len(blood_particles)
+        count = min(BLOOD_PARTICLE_COUNT, available_slots)
+        
+        for _ in range(count):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(BLOOD_PARTICLE_SPEED * 0.5, BLOOD_PARTICLE_SPEED)
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
+            
+            self.particles.append(
+                Particle(
+                    BLOOD,
+                    x,
+                    y,
+                    attributes={
+                        "id": self.next_id,
+                        "vx": vx,
+                        "vy": vy,
+                        "lifetime": BLOOD_PARTICLE_LIFETIME,
+                        "size": BLOOD_PARTICLE_SIZE,
+                        "alpha": 255
+                    }
+                )
+            )
+            self.next_id += 1
 
-        # 3. 边界检查
-        if player.x < 100:  # 靠近左边界
-            move_x += 1
-        elif player.x > SCREEN_WIDTH - 100:  # 靠近右边界
-            move_x -= 1
-        if player.y < 100:  # 靠近上边界
-            move_y += 1
-        elif player.y > SCREEN_HEIGHT - 100:  # 靠近下边界
-            move_y -= 1
+    def _find_safest_direction(self, player_pos, threat_map):
+        """Find the safest direction for the agent to move based on the threat map."""
+        min_threat = float('inf')
+        safest_direction = (0, 0)
+        for x, y in threat_map:
+            dx = x - player_pos[0]
+            dy = y - player_pos[1]
+            distance = math.sqrt(dx * dx + dy * dy)
+            if distance > 0:
+                threat = threat_map[(x, y)]
+                if threat < min_threat:
+                    min_threat = threat
+                    safest_direction = (dx / distance, dy / distance)
+        return safest_direction
 
-        # 4. 归一化最终移动方向
-        move_dist = math.sqrt(move_x * move_x + move_y * move_y)
-        if move_dist > 0:
-            move_x /= move_dist
-            move_y /= move_dist
+    def _movement_to_actions(self, move_x, move_y):
+        """Convert movement vector to action inputs."""
+        actions = [False, False, False, False, False]
+        if move_x < -0.3:
+            actions[0] = True  # Left
+        elif move_x > 0.3:
+            actions[1] = True  # Right
+        if move_y < -0.3:
+            actions[2] = True  # Up
+        elif move_y > 0.3:
+            actions[3] = True  # Down
+        return actions
 
-        # 5. 转换为按键输入
-        move_left = move_x < -0.3
-        move_right = move_x > 0.3
-        move_up = move_y < -0.3
-        move_down = move_y > 0.3
+    def protect_weapon_colors(self, weapon):
+        """Protect the colors of weapons to ensure they are not modified."""
+        if weapon.attributes.get("weapon_name") == "Knife" and weapon.attributes.get("is_knife"):
+            # 恢复飞刀的颜色
+            weapon.attributes["main_color"] = "#FFFFFF"
+            weapon.attributes["border_color"] = "#8B4513"
+            weapon.attributes["shape_color"] = "#FFFFFF"
+            weapon.attributes["color_locked"] = True
+            weapon.attributes["is_knife"] = True
+            weapon.attributes["original_main_color"] = "#FFFFFF"
+            weapon.attributes["original_border_color"] = "#8B4513"
 
-        # 6. 特殊情况处理
-        if enemies and enemies[0]['dist'] < 50:  # 敌人非常近时
-            # 强制向远离最近敌人的方向移动
-            nearest = enemies[0]
-            move_left = nearest['dx'] < 0
-            move_right = nearest['dx'] > 0
-            move_up = nearest['dy'] < 0
-            move_down = nearest['dy'] > 0
+    def spawn_damage_text(self, x, y, damage_amount):
+        """Generate damage text at the specified position."""
+        if int(damage_amount) <= 0:
+            return  # 伤害为0不显示跳字
+            
+        # 限制同时存在的伤害文本数量
+        damage_texts = [p for p in self.particles if p.kind == DAMAGE_TEXT]
+        if len(damage_texts) >= MAX_DAMAGE_TEXTS:
+            # 找到最旧的伤害文本并移除
+            oldest_text = min(damage_texts, key=lambda p: p.attributes.get("timer", 0))
+            self.remove_particle(oldest_text)
+            
+        # 如果没有可合并的，创建新的伤害文本
+        self.particles.append(
+            Particle(
+                DAMAGE_TEXT,
+                x,
+                y,
+                attributes={
+                    "text": str(int(damage_amount)),
+                    "timer": DAMAGE_TEXT_DURATION,
+                    "id": self.next_id,
+                    "alpha": 255,
+                    "scale": 0.5,
+                    "scale_phase": "grow",
+                    "color": "#FFFFFF"
+                }
+            )
+        )
+        self.next_id += 1
 
-        return [move_left, move_right, move_up, move_down, False]
+    def _is_safe_to_collect_xp(self, player, game_state):
+        """Check if it's safe for the agent to collect experience points."""
+        # 检查周围是否有敌人
+        for enemy_info in game_state["enemies"]:
+            if enemy_info["distance"] < 300:  # 增加安全距离
+                return False
+        
+        # 检查是否被包围
+        if game_state["is_surrounded"]:
+            return False
+            
+        # 检查当前网格的安全性
+        grid_width = SCREEN_WIDTH / 8
+        grid_height = SCREEN_HEIGHT / 4
+        current_grid_x = int(player.x / grid_width)
+        current_grid_y = int(player.y / grid_height)
+        
+        # 计算当前网格中心点
+        center_x = (current_grid_x + 0.5) * grid_width
+        center_y = (current_grid_y + 0.5) * grid_height
+        
+        # 计算当前网格得分
+        score = self._calculate_grid_score(player, center_x, center_y, game_state["enemies"], grid_width, grid_height)
+        
+        # 如果得分太高，认为不安全
+        return score < 2.0
 
     def draw_start_menu(self, frame):
-        """Draw the start menu screen"""
+        """Draw the start menu screen."""
         # Background
         frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#000000"))
         
@@ -3110,310 +3428,3 @@ class Game(BaseGame):
         instruction_y = SCREEN_HEIGHT // 2 + 50
         frame.add_text(Text(instruction_x, instruction_y, 
             "WASD to move, survive as long as possible!", "#CCCCCC", 16))
-
-    def draw_upgrade_menu(self, frame):
-        """Draw the upgrade menu screen，严格层级：背景-按钮-文本-烟花"""
-        # 1. 半透明界面背景（遮住粒子但不完全不透明）
-        frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#222244CC"))
-        # 2. 动画缩放
-        scale = 1.0
-        if hasattr(self, 'upgrade_anim_timer') and self.upgrade_anim_timer > 0:
-            scale = 0.7 + 0.3 * (1 - self.upgrade_anim_timer / 12)
-            self.upgrade_anim_timer -= 1
-        cx, cy = SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2
-        def sx(x): return int((x - cx) * scale + cx)
-        def sy(y): return int((y - cy) * scale + cy)
-        # 3. 按钮（背景之上）
-        for i, upgrade in enumerate(self.upgrade_options):
-            button_y = cy - 50 + i * (BUTTON_HEIGHT + 20)
-            btn_x = sx(cx - BUTTON_WIDTH // 2)
-            btn_y = sy(button_y)
-            btn_w = max(60, int(BUTTON_WIDTH * scale))
-            btn_h = max(20, int(BUTTON_HEIGHT * scale))
-            
-            # Determine button color based on selection and hover
-            is_selected = i == self.selected_upgrade_index
-            is_hovered = self.is_point_in_rect(
-                self.mouse_pos[0], self.mouse_pos[1],
-                btn_x, btn_y, btn_w, btn_h
-            )
-            button_color = "#4444AA" if is_selected else "#333366"
-            if is_hovered:
-                button_color = "#5555BB"
-            
-            frame.add_rectangle(Rectangle(
-                btn_x,
-                btn_y,
-                btn_w,
-                btn_h,
-                button_color
-            ))
-            
-            # Add selection indicator
-            if is_selected:
-                frame.add_text(Text(
-                    btn_x - 20,
-                    btn_y + btn_h // 2,
-                    ">",
-                    "#FFFFFF",
-                    max(10, int(24 * scale))
-                ))
-        
-        # 4. 文本（按钮之上）
-        levelup_text = "Level Up!"
-        font_size = max(10, int(40 * scale))
-        text_width = len(levelup_text) * font_size * 0.5
-        frame.add_text(Text(sx(cx - text_width // 2), sy(cy - 150), levelup_text, "#FFFFFF", font_size))
-        
-        for i, upgrade in enumerate(self.upgrade_options):
-            button_y = cy - 50 + i * (BUTTON_HEIGHT + 20)
-            btn_x = sx(cx - BUTTON_WIDTH // 2)
-            btn_y = sy(button_y)
-            btn_w = max(60, int(BUTTON_WIDTH * scale))
-            btn_h = max(20, int(BUTTON_HEIGHT * scale))
-            upgrade_text = ""
-            if upgrade["type"] == "new_weapon":
-                upgrade_text = "New: {}".format(upgrade["display"])
-            elif upgrade["type"] == "upgrade_weapon":
-                upgrade_text = "Upgrade: {} Lv.{}".format(upgrade["display"], upgrade["level"])
-            else:
-                upgrade_text = "{}".format(upgrade["display"])
-            text_x = btn_x + btn_w // 2 - len(upgrade_text) * 5
-            text_y = btn_y + btn_h // 2 + 5
-            frame.add_text(Text(
-                text_x,
-                text_y,
-                upgrade_text,
-                BUTTON_TEXT_COLOR,
-                max(10, int(18 * scale))
-            ))
-        # 5. 烟花特效（最上层）
-        if hasattr(self, 'upgrade_fireworks'):
-            for fw in self.upgrade_fireworks:
-                fw[0] += math.cos(fw[4]) * fw[5]
-                fw[1] += math.sin(fw[4]) * fw[5]
-                fw[2] = max(1, fw[2] - 0.2)
-                fw[6] += 1
-                frame.add_circle(Circle(fw[0], fw[1], fw[2], fw[3]))
-            self.upgrade_fireworks = [fw for fw in self.upgrade_fireworks if fw[6] < 30]
-
-    def draw_game_over(self, frame):
-        """Draw the game over screen"""
-        # Darkened background
-        frame.add_rectangle(Rectangle(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, "#00000088"))
-        
-        # Game over text
-        frame.add_text(Text(SCREEN_WIDTH // 2 - 140, SCREEN_HEIGHT // 2 - 100, "Game Over", "#FF0000", 50))
-        
-        # Score
-        frame.add_text(Text(SCREEN_WIDTH // 2 - 100, SCREEN_HEIGHT // 2 - 30, f"Score: {self.score}", "#FFFFFF", 30))
-        
-        # Time survived
-        time_str = self.format_time(self.game_timer)
-        frame.add_text(Text(SCREEN_WIDTH // 2 - 120, SCREEN_HEIGHT // 2 + 10, f"Time Survived: {time_str}", "#FFFFFF", 30))
-        
-        # Restart button
-        button_background = BUTTON_HOVER_COLOR if self.is_point_in_rect(
-            self.mouse_pos[0], self.mouse_pos[1],
-            SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-            SCREEN_HEIGHT // 2 + 80,
-            BUTTON_WIDTH, BUTTON_HEIGHT
-        ) else BUTTON_COLOR
-        
-        frame.add_rectangle(Rectangle(
-            SCREEN_WIDTH // 2 - BUTTON_WIDTH // 2,
-            SCREEN_HEIGHT // 2 + 80,
-            BUTTON_WIDTH, BUTTON_HEIGHT,
-            button_background
-        ))
-        
-        frame.add_text(Text(
-            SCREEN_WIDTH // 2 - 40,
-            SCREEN_HEIGHT // 2 + 110,
-            "Restart",
-            BUTTON_TEXT_COLOR,
-            20
-        ))
-
-    def spawn_damage_text(self, x, y, damage_amount):
-        """优化的伤害文本生成"""
-        if int(damage_amount) <= 0:
-            return  # 伤害为0不显示跳字
-            
-        # 限制同时存在的伤害文本数量
-        damage_texts = [p for p in self.particles if p.kind == DAMAGE_TEXT]
-        if len(damage_texts) >= MAX_DAMAGE_TEXTS:
-            # 找到最旧的伤害文本并移除
-            oldest_text = min(damage_texts, key=lambda p: p.attributes.get("timer", 0))
-            self.remove_particle(oldest_text)
-            
-        # 如果没有可合并的，创建新的伤害文本
-        self.particles.append(
-            Particle(
-                DAMAGE_TEXT,
-                x,
-                y,
-                attributes={
-                    "text": str(int(damage_amount)),
-                    "timer": DAMAGE_TEXT_DURATION,
-                    "id": self.next_id,
-                    "alpha": 255,
-                    "scale": 0.5,
-                    "scale_phase": "grow",
-                    "color": "#FFFFFF"
-                }
-            )
-        )
-        self.next_id += 1
-
-    def apply_damage(self, attacker, defender, damage):
-        """
-        应用伤害从攻击者到防御者
-        """
-        # 圣经冷却处理，未真正造成伤害时直接return True，不显示跳字
-        if attacker.attributes.get("weapon_name") == "KingBible":
-            cooldowns = attacker.attributes.setdefault("hit_cooldown", {})
-            eid = int(defender.attributes["id"])
-            if cooldowns.get(eid, 0) > 0:
-                return True  # 冷却中直接返回，不显示跳字
-            cooldowns[eid] = 30
-            level = attacker.attributes.get("level", 1)
-            custom_damage = self.get_kingbible_damage(level)
-            if custom_damage:
-                damage = custom_damage
-        if damage <= 0:
-            damage = 1
-        if defender.health_system:
-            old_hp = defender.health_system.current_hp
-            is_alive = defender.take_damage(damage)
-            # 只有敌人被玩家或武器攻击时才显示伤害跳字，且实际伤害大于0才显示
-            if defender.kind in ["enemy", "enemy_elite"] and attacker.kind not in ["enemy", "enemy_elite"]:
-                actual_damage = old_hp - defender.health_system.current_hp if defender.health_system else damage
-                if actual_damage > 0:
-                    self.spawn_damage_text(defender.x, defender.y, actual_damage)
-            if not is_alive and defender.kind in ["enemy", "enemy_elite"]:
-                self.on_particle_death(defender, attacker, show_death_anim=True)
-            return is_alive
-        else:
-            return True
-
-
-    def get_kingbible_damage(self, level):
-        if level <= 3:
-            return 10
-        elif level <= 6:
-            return 20
-        else:
-            return 30
-    
-    def on_particle_death(self, dead_particle, killer_particle=None, show_death_anim=False):
-        """
-        处理粒子死亡的事件
-        """
-        if dead_particle.kind in ["enemy", "enemy_elite"]:
-            self.score += 10 if dead_particle.kind == "enemy" else 30
-            should_drop_xp = (dead_particle.kind == "enemy_elite") or (random.random() < XP_DROP_CHANCE)
-            if should_drop_xp:
-                xp_value = dead_particle.attributes.get("xp_value", 10)
-                self.spawn_xp(dead_particle.x, dead_particle.y)
-            # 死亡动画：闪白+缩小
-            if show_death_anim:
-                dead_particle.attributes["death_anim_timer"] = 30  # 30帧=500ms
-                dead_particle.attributes["death_anim_progress"] = 0
-                dead_particle.attributes["is_dying"] = True
-            else:
-                if dead_particle in self.particles:
-                    self.remove_particle(dead_particle)
-        else:
-            if dead_particle in self.particles:
-                self.remove_particle(dead_particle)
-
-    def protect_weapon_colors(self, weapon):
-        """保护武器的颜色属性不被修改"""
-        if weapon.attributes.get("weapon_name") == "Knife" and weapon.attributes.get("is_knife"):
-            # 恢复飞刀的颜色
-            weapon.attributes["main_color"] = "#FFFFFF"
-            weapon.attributes["border_color"] = "#8B4513"
-            weapon.attributes["shape_color"] = "#FFFFFF"
-            weapon.attributes["color_locked"] = True
-            weapon.attributes["is_knife"] = True
-            weapon.attributes["original_main_color"] = "#FFFFFF"
-            weapon.attributes["original_border_color"] = "#8B4513"
-
-    def check_enemy_collision(self, enemy1, enemy2):
-        """检查两个敌人之间的距离，返回是否在排斥范围内以及相关向量"""
-        # 获取敌人尺寸
-        size1 = ELITE_SIZE if enemy1.kind == ENEMY_ELITE else ENEMY_SIZE
-        size2 = ELITE_SIZE if enemy2.kind == ENEMY_ELITE else ENEMY_SIZE
-        
-        # 计算两个敌人之间的距离
-        dx = enemy2.x - enemy1.x
-        dy = enemy2.y - enemy1.y
-        distance = math.sqrt(dx * dx + dy * dy)
-        
-        # 计算排斥范围（1.5倍敌人尺寸）
-        repulsion_range = (size1 + size2) * 1.2
-        
-        # 如果距离小于排斥范围，返回排斥信息
-        return distance < repulsion_range, dx, dy, distance
-
-    def spawn_blood_effect(self, x, y):
-        """优化的血液效果生成"""
-        # 限制同时存在的血液粒子数量
-        blood_particles = [p for p in self.particles if p.kind == BLOOD]
-        if len(blood_particles) >= MAX_BLOOD_PARTICLES:
-            return
-            
-        # 计算可以生成的新粒子数量
-        available_slots = MAX_BLOOD_PARTICLES - len(blood_particles)
-        count = min(BLOOD_PARTICLE_COUNT, available_slots)
-        
-        for _ in range(count):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(BLOOD_PARTICLE_SPEED * 0.5, BLOOD_PARTICLE_SPEED)
-            vx = math.cos(angle) * speed
-            vy = math.sin(angle) * speed
-            
-            self.particles.append(
-                Particle(
-                    BLOOD,
-                    x,
-                    y,
-                    attributes={
-                        "id": self.next_id,
-                        "vx": vx,
-                        "vy": vy,
-                        "lifetime": BLOOD_PARTICLE_LIFETIME,
-                        "size": BLOOD_PARTICLE_SIZE,
-                        "alpha": 255
-                    }
-                )
-            )
-            self.next_id += 1
-
-    def toggle_debug_toolbar(self):
-        """Toggle the debug toolbar visibility"""
-        self.show_debug_toolbar = not self.show_debug_toolbar
-        print(f"[DEBUG] Debug toolbar toggled to: {self.show_debug_toolbar}")
-        print(f"[DEBUG] Game state: {self.game_state}")
-        
-        # Print player info if available
-        player = self.get_particle(PLAYER)
-        if player:
-            print(f"[DEBUG] Player weapons: {player.attributes.get('weapons', {})}")
-
-    def get_garlic_border_color(self, weapon):
-        """获取大蒜武器边框的颜色，带呼吸效果"""
-        # 更新呼吸计时器
-        breath_timer = weapon.attributes.get("breath_timer", 0)
-        weapon.attributes["breath_timer"] = (breath_timer + 1) % 60  # 60帧一个周期
-        
-        # 使用正弦函数生成0-1之间的值
-        breath_progress = math.sin(breath_timer * math.pi / 30)  # 30是60的一半，让正弦波在0-1之间
-        breath_progress = (breath_progress + 1) / 2  # 将-1到1映射到0到1
-        
-        # 将进度值映射到30%-60%的透明度范围
-        alpha = int(30 + breath_progress * 50)  # 30%-60%的范围
-        
-        # 返回带有动态透明度的红色
-        return f"#FF0000{alpha:02x}"  # 使用十六进制格式的透明度

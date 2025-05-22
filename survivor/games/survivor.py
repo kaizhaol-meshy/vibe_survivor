@@ -359,7 +359,8 @@ class Game(BaseGame):
         self.particles = []
         self.next_id = 0
         self.game_state = STATE_START_MENU
-        self.show_debug_toolbar = True  # Initialize debug toolbar visibility flag
+        self.show_debug_toolbar = False  # 默认关闭debug toolbar
+        self.is_agent_mode = False  # 添加agent模式标志
         
         # 初始化空间网格
         self.spatial_grid = {}
@@ -386,7 +387,7 @@ class Game(BaseGame):
         self.score = 0
         self.level = 1
         self.xp = 0
-        self.xp_to_next_level = self.level * 50
+        self.xp_to_next_level = 150
         
         # 计时器
         self.last_reset = 0
@@ -446,60 +447,7 @@ class Game(BaseGame):
                 if (gx, gy) in self.spatial_grid:
                     nearby.extend(self.spatial_grid[(gx, gy)])
         return nearby
-        self.available_upgrades = []
-        self.selected_upgrade_index = 0
-        self.frame_count = 0
-        self.kill_count = 0
-        self.elite_kill_count = 0
-        self.last_spawn_time = 0
-        self.last_elite_spawn_time = 0
-        self.spawn_cooldown = 60
-        self.elite_spawn_cooldown = 300
-        self.wave_number = 0
-        self.last_wave_time = 0
-        self.wave_interval = 1800  # 30 seconds at 60fps
-        
-        # Score variables
-        self.score = 0
-        self.level = 1
-        self.xp = 0
-        self.xp_to_next_level = self.level * 50
-        
-        # Timer variables
-        self.last_reset = 0
-        self.game_timer = 0
-        self.wave_timer = 0
-        self.current_wave = 0
-        self.min_enemies_per_wave = MIN_ENEMIES_PER_WAVE
-        self.next_spawn_timer = 0
-        
-        # Health animation system
-        self.hp_displayed = 100  # The smoothly displayed HP (for animation)
-        self.hp_transition_timer = 0  # Timer for HP transition animation
-        self.hp_blink_timer = 0  # Timer for HP blinking effect
-        self.hp_section = 5  # HP threshold for each section of health bar
-        
-        # Upgrade menu variables
-        self.upgrade_options = []
-        
-        # Mouse handling
-        self.mouse_pos = (0, 0)
-        self.mouse_clicked = False
-        
-        # 初始化空间网格
-        self.spatial_grid = {}
-        self.damage_text_count = 0
-        self.blood_particle_count = 0
-        
-        self.initialize_game()
-        self.set_system_prompt(
-            "Vampire Survivors-like game. Survive as long as possible by collecting XP and leveling up. "
-            "Enemies will spawn from the edges of the screen and chase you. "
-            "Your weapons will automatically orbit around you and attack nearby enemies."
-        )
-        self.last_move_dir = (1, 0)  # 默认向右
-        self.knife_projectile_timer = 0
-    
+
     def get_frame(self):
         """Get the current frame of the game"""
         frame = Frame()
@@ -737,7 +685,7 @@ class Game(BaseGame):
     
     def draw_debug_toolbar(self, frame):
         """Draw the debug toolbar at the bottom of the screen"""
-        if not self.show_debug_toolbar:
+        if not self.show_debug_toolbar or self.is_agent_mode:  # 在agent模式下不显示
             return
             
         # Background for debug toolbar
@@ -901,8 +849,8 @@ class Game(BaseGame):
         if actions is None:
             actions = []
             
-        # Toggle debug toolbar with q key
-        if "q" in actions:
+        # Toggle debug toolbar with q key (仅在非agent模式下)
+        if "q" in actions and not self.is_agent_mode:
             self.toggle_debug_toolbar()
             
         self.mouse_pos = mouse_pos if mouse_pos else (0, 0)
@@ -2918,10 +2866,10 @@ class Game(BaseGame):
                     enemy2.y = max(0, min(SCREEN_HEIGHT, enemy2.y))
 
     def agent_action(self, last_action=None):
-        """
-        AI agent that mimics human player behavior in a Vampire Survivors-like game.
-        Prioritizes survival while maintaining smooth movement and strategic XP collection.
-        """
+        """Set agent mode and handle agent actions"""
+        self.is_agent_mode = True  # 设置agent模式
+        self.show_debug_toolbar = False  # 确保在agent模式下关闭debug toolbar
+        
         # Handle menu states
         if self.game_state != STATE_PLAYING:
             return self._handle_menu_states()
@@ -3101,27 +3049,43 @@ class Game(BaseGame):
         player_pos = (player.x, player.y)
         enemy_positions = [(enemy_info["enemy"].x, enemy_info["enemy"].y) for enemy_info in game_state["enemies"]]
         
-        # 威胁评估：创建敌人密度图
+        # 威胁评估：创建敌人密度图和预测威胁
         threat_map = self._create_threat_map(player_pos, enemy_positions)
+        predicted_threats = self._predict_enemy_movements(player_pos, game_state["enemies"])
         
-        # 检查是否被包围
-        if game_state["is_surrounded"]:
-            # 逃脱机制：寻找最弱围堵点
-            escape_direction = self._find_escape_direction(player_pos, enemy_positions, threat_map)
-            move_x, move_y = escape_direction
-        else:
-            # 在安全区域内，选择最近经验球所在方向
-            nearest_xp = self._find_nearest_xp(player)
-            if nearest_xp and self._is_safe_to_collect_xp(player, game_state):
-                xp_dx = nearest_xp.x - player.x
-                xp_dy = nearest_xp.y - player.y
-                xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
-                if xp_dist > 0:
-                    move_x = xp_dx / xp_dist
-                    move_y = xp_dy / xp_dist
+        # 检查是否处于危险状态
+        is_in_danger = self._check_danger_state(player, game_state["enemies"])
+        
+        # 检查是否在角落
+        is_in_corner = self._is_in_corner(player)
+        
+        if is_in_danger or is_in_corner:
+            # 紧急避险：寻找最安全的逃生路径
+            escape_path = self._calculate_emergency_escape(player, game_state["enemies"], predicted_threats)
+            if escape_path:
+                move_x, move_y = escape_path
             else:
-                # 选择威胁最小的方向
-                move_x, move_y = self._find_safest_direction(player_pos, threat_map)
+                # 如果找不到逃生路径，使用预测性躲避
+                move_x, move_y = self._predictive_dodge(player, game_state["enemies"])
+        else:
+            # 正常状态下的移动决策
+            if game_state["is_surrounded"]:
+                # 逃脱机制：寻找最弱围堵点
+                escape_direction = self._find_escape_direction(player_pos, enemy_positions, threat_map)
+                move_x, move_y = escape_direction
+            else:
+                # 在安全区域内，选择最近经验球所在方向
+                nearest_xp = self._find_nearest_xp(player)
+                if nearest_xp and self._is_safe_to_collect_xp(player, game_state):
+                    xp_dx = nearest_xp.x - player.x
+                    xp_dy = nearest_xp.y - player.y
+                    xp_dist = math.sqrt(xp_dx * xp_dx + xp_dy * xp_dy)
+                    if xp_dist > 0:
+                        move_x = xp_dx / xp_dist
+                        move_y = xp_dy / xp_dist
+                else:
+                    # 选择威胁最小的方向
+                    move_x, move_y = self._find_safest_direction(player_pos, threat_map)
         
         # 移动平滑策略
         if last_action:
@@ -3428,3 +3392,270 @@ class Game(BaseGame):
         instruction_y = SCREEN_HEIGHT // 2 + 50
         frame.add_text(Text(instruction_x, instruction_y, 
             "WASD to move, survive as long as possible!", "#CCCCCC", 16))
+
+    def _check_danger_state(self, player, enemies):
+        """Check if the player is in a dangerous situation."""
+        if not enemies:
+            return False
+            
+        # 检查是否在角落
+        is_in_corner = self._is_in_corner(player)
+        
+        # 计算近距离敌人数量
+        nearby_enemies = [e for e in enemies if e["distance"] < 150]
+        if len(nearby_enemies) >= 3:
+            return True
+            
+        # 检查是否有精英敌人接近
+        elite_threat = any(e["enemy"].kind == ENEMY_ELITE and e["distance"] < 200 for e in enemies)
+        if elite_threat:
+            return True
+            
+        # 检查是否被包围
+        is_surrounded = self._check_surrounded(enemies)
+        
+        # 如果在角落且被包围，强制进入危险状态
+        if is_in_corner and is_surrounded:
+            return True
+            
+        return is_surrounded
+
+    def _is_in_corner(self, player):
+        """Check if the player is in a corner of the map."""
+        corner_margin = 150  # 增加角落判定范围
+        
+        # 检查是否在四个角落区域
+        is_left = player.x < corner_margin
+        is_right = player.x > SCREEN_WIDTH - corner_margin
+        is_top = player.y < corner_margin
+        is_bottom = player.y > SCREEN_HEIGHT - corner_margin
+        
+        # 检查是否在角落区域且被敌人包围
+        if (is_left or is_right) and (is_top or is_bottom):
+            # 获取附近的敌人
+            nearby_enemies = [e for e in self.get_particles(ENEMY) if 
+                abs(e.x - player.x) < 200 and abs(e.y - player.y) < 200]
+            
+            # 如果附近有敌人，认为处于危险角落
+            return len(nearby_enemies) > 0
+        
+        return False
+
+    def _calculate_emergency_escape(self, player, enemies, predicted_threats):
+        """Calculate the best emergency escape route."""
+        best_path = None
+        max_safety = -float('inf')
+        
+        # 检查是否在角落
+        is_in_corner = self._is_in_corner(player)
+        
+        # 如果在角落，使用更激进的突围策略
+        if is_in_corner:
+            return self._calculate_breakthrough(player, enemies)
+        
+        # 检查16个可能的方向
+        for angle in range(0, 360, 23):
+            rad = math.radians(angle)
+            test_x = math.cos(rad)
+            test_y = math.sin(rad)
+            
+            # 计算这个方向的安全性
+            safety = self._calculate_escape_safety(player, test_x, test_y, enemies, predicted_threats)
+            
+            if safety > max_safety:
+                max_safety = safety
+                best_path = (test_x, test_y)
+        
+        return best_path
+
+    def _calculate_breakthrough(self, player, enemies):
+        """Calculate the best direction to break through enemy lines."""
+        if not enemies:
+            return 0, 0
+        
+        # 获取最近的敌人
+        nearby_enemies = sorted(enemies, key=lambda x: x["distance"])[:5]
+        
+        # 计算敌人的包围中心点
+        center_x = sum(e["enemy"].x for e in nearby_enemies) / len(nearby_enemies)
+        center_y = sum(e["enemy"].y for e in nearby_enemies) / len(nearby_enemies)
+        
+        # 计算从玩家到包围中心的向量
+        dx = center_x - player.x
+        dy = center_y - player.y
+        
+        # 计算包围圈的平均半径
+        avg_radius = sum(e["distance"] for e in nearby_enemies) / len(nearby_enemies)
+        
+        # 如果包围圈太近，使用更激进的突围策略
+        if avg_radius < 200:  # 增加判定范围
+            # 获取最薄弱的方向
+            weak_direction = self._find_weakest_point(player, nearby_enemies)
+            
+            # 获取玩家当前位置
+            player_x, player_y = player.x, player.y
+            
+            # 计算突围方向
+            break_x, break_y = weak_direction
+            
+            # 根据玩家在角落的位置调整突围方向
+            if player_x < 150:  # 在左边缘
+                break_x = max(break_x, 0.5)  # 强制向右
+            elif player_x > SCREEN_WIDTH - 150:  # 在右边缘
+                break_x = min(break_x, -0.5)  # 强制向左
+                
+            if player_y < 150:  # 在上边缘
+                break_y = max(break_y, 0.5)  # 强制向下
+            elif player_y > SCREEN_HEIGHT - 150:  # 在下边缘
+                break_y = min(break_y, -0.5)  # 强制向上
+            
+            # 归一化突围向量
+            length = math.sqrt(break_x * break_x + break_y * break_y)
+            if length > 0:
+                return break_x / length, break_y / length
+        
+        # 如果不在紧急状态，选择远离包围中心的方向
+        length = math.sqrt(dx * dx + dy * dy)
+        if length > 0:
+            return -dx / length, -dy / length
+        
+        return 0, 0
+
+    def _find_weakest_point(self, player, enemies):
+        """Find the weakest point in the enemy formation to break through."""
+        if not enemies:
+            return 0, 0
+        
+        # 将周围空间分成16个扇区（更细致的分析）
+        sectors = [0] * 16
+        sector_angles = [i * 22.5 for i in range(16)]  # 360/16 = 22.5度
+        
+        # 计算每个扇区的敌人密度和威胁度
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            angle = math.degrees(math.atan2(dy, dx))
+            if angle < 0:
+                angle += 360
+            
+            # 确定敌人所在的扇区
+            sector = int(angle / 22.5) % 16
+            
+            # 根据敌人类型和距离计算威胁度
+            threat = 1.0
+            if enemy.kind == ENEMY_ELITE:
+                threat = 2.0
+            
+            # 距离越近威胁越大
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0:
+                threat *= 1.0 / dist
+            
+            sectors[sector] += threat
+        
+        # 找到威胁最小的扇区
+        min_threat = float('inf')
+        best_sector = 0
+        for i, threat in enumerate(sectors):
+            if threat < min_threat:
+                min_threat = threat
+                best_sector = i
+        
+        # 计算突围方向
+        angle = math.radians(sector_angles[best_sector])
+        return math.cos(angle), math.sin(angle)
+
+    def _predict_enemy_movements(self, player_pos, enemies):
+        """Predict future enemy positions and create a threat map."""
+        predicted_threats = {}
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = player_pos[0] - enemy.x
+            dy = player_pos[1] - enemy.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist > 0:
+                # 预测未来3个时间步的位置
+                for step in range(1, 4):
+                    pred_x = enemy.x + (dx / dist) * (50 * step)
+                    pred_y = enemy.y + (dy / dist) * (50 * step)
+                    
+                    # 将预测位置添加到威胁图中
+                    grid_x = (pred_x // GRID_SIZE) * GRID_SIZE
+                    grid_y = (pred_y // GRID_SIZE) * GRID_SIZE
+                    key = (grid_x, grid_y)
+                    
+                    if key not in predicted_threats:
+                        predicted_threats[key] = 0
+                    predicted_threats[key] += 1 / step  # 越远的预测威胁越小
+        
+        return predicted_threats
+
+    def _calculate_escape_safety(self, player, dir_x, dir_y, enemies, predicted_threats):
+        """Calculate the safety score for a potential escape direction."""
+        safety = 0
+        
+        # 检查当前威胁
+        for enemy_info in enemies:
+            enemy = enemy_info["enemy"]
+            dx = enemy.x - player.x
+            dy = enemy.y - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist > 0:
+                # 计算敌人到该方向的距离
+                dot_product = (dx * dir_x + dy * dir_y) / dist
+                if dot_product > 0:
+                    safety -= 1 / (dist * dist)
+        
+        # 检查预测威胁
+        for pos, threat in predicted_threats.items():
+            dx = pos[0] - player.x
+            dy = pos[1] - player.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            
+            if dist > 0:
+                dot_product = (dx * dir_x + dy * dir_y) / dist
+                if dot_product > 0:
+                    safety -= threat / (dist * dist)
+        
+        return safety
+
+    def _predictive_dodge(self, player, enemies):
+        """Perform predictive dodging based on enemy movement patterns."""
+        if not enemies:
+            return 0, 0
+            
+        # 获取最近的敌人
+        nearest_enemies = sorted(enemies, key=lambda x: x["distance"])[:3]
+        
+        # 计算敌人的平均移动方向
+        avg_dx = 0
+        avg_dy = 0
+        for enemy_info in nearest_enemies:
+            enemy = enemy_info["enemy"]
+            dx = player.x - enemy.x
+            dy = player.y - enemy.y
+            dist = math.sqrt(dx * dx + dy * dy)
+            if dist > 0:
+                avg_dx += dx / dist
+                avg_dy += dy / dist
+        
+        if len(nearest_enemies) > 0:
+            avg_dx /= len(nearest_enemies)
+            avg_dy /= len(nearest_enemies)
+            
+            # 计算垂直方向（躲避方向）
+            dodge_x = -avg_dy
+            dodge_y = avg_dx
+            
+            # 归一化
+            length = math.sqrt(dodge_x * dodge_x + dodge_y * dodge_y)
+            if length > 0:
+                dodge_x /= length
+                dodge_y /= length
+                
+            return dodge_x, dodge_y
+        
+        return 0, 0
